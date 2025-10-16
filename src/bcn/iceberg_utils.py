@@ -2,6 +2,7 @@
 Iceberg metadata utilities for parsing and modifying Iceberg table files
 """
 
+import copy
 from io import BytesIO
 from typing import Dict, List, Tuple
 
@@ -65,7 +66,7 @@ class PathAbstractor:
         Returns:
             Modified metadata with abstracted paths
         """
-        abstracted = metadata_content.copy()
+        abstracted = copy.deepcopy(metadata_content)
 
         # Abstract location
         if "location" in abstracted:
