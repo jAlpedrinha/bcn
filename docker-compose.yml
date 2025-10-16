@@ -1,0 +1,168 @@
+version: '3.8'
+
+services:
+  # MinIO - S3-compatible object storage
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: password
+    command: server /data --console-address ":9001"
+    volumes:
+      - ./docker/minio-data:/data
+    networks:
+      - hive-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # MinIO Client - to create bucket on startup
+  minio-setup:
+    image: minio/mc:latest
+    container_name: minio-setup
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      sleep 5;
+      /usr/bin/mc alias set myminio http://minio:9000 admin password;
+      /usr/bin/mc mb myminio/warehouse --ignore-existing;
+      /usr/bin/mc mb myminio/iceberg --ignore-existing;
+      exit 0;
+      "
+    networks:
+      - hive-network
+
+  # PostgreSQL - Hive Metastore database
+  postgres:
+    image: postgres:13
+    container_name: postgres-hive
+    environment:
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: hive
+      POSTGRES_DB: metastore
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - hive-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hive"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Hive Metastore
+  hive-metastore:
+    build:
+      context: ./docker/hive
+      dockerfile: Dockerfile
+    image: custom-hive:4.0.0
+    container_name: hive-metastore
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      SERVICE_NAME: metastore
+      DB_DRIVER: postgres
+      SERVICE_OPTS: "-Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
+                     -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://postgres:5432/metastore
+                     -Djavax.jdo.option.ConnectionUserName=hive
+                     -Djavax.jdo.option.ConnectionPassword=hive"
+      AWS_ACCESS_KEY_ID: admin
+      AWS_SECRET_ACCESS_KEY: password
+    ports:
+      - "9083:9083"
+    volumes:
+      - ./docker/hive/conf/hive-site.xml:/opt/hive/conf/hive-site.xml
+      - ./docker/hive/conf/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml
+    networks:
+      - hive-network
+    command: >
+      /bin/bash -c "
+      echo 'Waiting for PostgreSQL to be ready...';
+      until pg_isready -h postgres -p 5432 -U hive; do
+        echo 'PostgreSQL is unavailable - sleeping';
+        sleep 2;
+      done;
+      echo 'PostgreSQL is up - initializing schema';
+      /opt/hive/bin/schematool -dbType postgres -initSchema || true &&
+      echo 'Starting Hive Metastore';
+      /opt/hive/bin/hive --service metastore
+      "
+    healthcheck:
+      test: ["CMD", "bash", "-c", "timeout 2 bash -c '</dev/tcp/localhost/9083' 2>/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 120s
+
+  # HiveServer2
+  hiveserver2:
+    build:
+      context: ./docker/hive
+      dockerfile: Dockerfile
+    image: custom-hive:4.0.0
+    container_name: hiveserver2
+    depends_on:
+      hive-metastore:
+        condition: service_healthy
+    environment:
+      SERVICE_NAME: hiveserver2
+      SERVICE_OPTS: "-Dhive.metastore.uris=thrift://hive-metastore:9083"
+      AWS_ACCESS_KEY_ID: admin
+      AWS_SECRET_ACCESS_KEY: password
+      IS_RESUME: "true"
+    ports:
+      - "10000:10000"
+      - "10002:10002"
+    volumes:
+      - ./docker/hive/conf/hive-site.xml:/opt/hive/conf/hive-site.xml
+      - ./docker/hive/conf/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml
+    networks:
+      - hive-network
+
+  # Spark with Iceberg support (for testing)
+  spark:
+    build:
+      context: ./docker/spark
+      dockerfile: Dockerfile
+    image: custom-spark-iceberg:3.5.0
+    container_name: spark-iceberg
+    depends_on:
+      hive-metastore:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: admin
+      AWS_SECRET_ACCESS_KEY: password
+      AWS_REGION: us-east-1
+    ports:
+      - "8080:8080"
+      - "4040:4040"
+    volumes:
+      - ./docker/spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf
+      - ./docker/minio-data:/minio-data:ro
+    networks:
+      - hive-network
+    command: >
+      /bin/bash -c "
+      tail -f /dev/null
+      "
+
+networks:
+  hive-network:
+    driver: bridge
+
+volumes:
+  postgres-data:

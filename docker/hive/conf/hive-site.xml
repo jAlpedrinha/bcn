@@ -1,0 +1,82 @@
+<?xml version="1.0"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<configuration>
+  <!-- Metastore Configuration -->
+  <property>
+    <name>hive.metastore.warehouse.dir</name>
+    <value>s3a://warehouse/</value>
+  </property>
+
+  <property>
+    <name>hive.metastore.uris</name>
+    <value>thrift://hive-metastore:9083</value>
+  </property>
+
+  <!-- S3/MinIO Configuration -->
+  <property>
+    <name>fs.s3a.endpoint</name>
+    <value>http://minio:9000</value>
+  </property>
+
+  <property>
+    <name>fs.s3a.access.key</name>
+    <value>admin</value>
+  </property>
+
+  <property>
+    <name>fs.s3a.secret.key</name>
+    <value>password</value>
+  </property>
+
+  <property>
+    <name>fs.s3a.path.style.access</name>
+    <value>true</value>
+  </property>
+
+  <property>
+    <name>fs.s3a.connection.ssl.enabled</name>
+    <value>false</value>
+  </property>
+
+  <property>
+    <name>fs.s3a.impl</name>
+    <value>org.apache.hadoop.fs.s3a.S3AFileSystem</value>
+  </property>
+
+  <!-- Iceberg Configuration -->
+  <property>
+    <name>iceberg.engine.hive.enabled</name>
+    <value>true</value>
+  </property>
+
+  <property>
+    <name>hive.vectorized.execution.enabled</name>
+    <value>false</value>
+  </property>
+
+  <!-- Additional Hive Settings -->
+  <property>
+    <name>hive.execution.engine</name>
+    <value>mr</value>
+  </property>
+
+  <property>
+    <name>hive.support.concurrency</name>
+    <value>true</value>
+  </property>
+
+  <property>
+    <name>hive.txn.manager</name>
+    <value>org.apache.hadoop.hive.ql.lockmgr.DbTxnManager</value>
+  </property>
+
+  <property>
+    <name>hive.compactor.initiator.on</name>
+    <value>true</value>
+  </property>
+
+  <property>
+    <name>hive.compactor.worker.threads</name>
+    <value>1</value>
+  </property>
+</configuration>

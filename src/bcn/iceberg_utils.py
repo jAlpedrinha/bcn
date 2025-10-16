@@ -1,0 +1,449 @@
+"""
+Iceberg metadata utilities for parsing and modifying Iceberg table files
+"""
+import json
+from io import BytesIO
+from typing import Dict, List, Optional, Tuple
+
+import avro.datafile
+import avro.io
+import avro.schema
+
+
+class IcebergMetadataParser:
+    """Parser for Iceberg metadata files"""
+
+    @staticmethod
+    def parse_metadata_file(content: str) -> Dict:
+        """
+        Parse Iceberg metadata JSON file
+
+        Args:
+            content: JSON content as string
+
+        Returns:
+            Parsed metadata dictionary
+        """
+        return json.loads(content)
+
+    @staticmethod
+    def extract_table_location(metadata: Dict) -> str:
+        """
+        Extract table location from metadata
+
+        Args:
+            metadata: Parsed metadata dictionary
+
+        Returns:
+            Table location path
+        """
+        return metadata.get('location', '')
+
+    @staticmethod
+    def get_current_snapshot_id(metadata: Dict) -> Optional[int]:
+        """
+        Get current snapshot ID from metadata
+
+        Args:
+            metadata: Parsed metadata dictionary
+
+        Returns:
+            Current snapshot ID, or None if not found
+        """
+        return metadata.get('current-snapshot-id')
+
+    @staticmethod
+    def get_snapshots(metadata: Dict) -> List[Dict]:
+        """
+        Get list of snapshots from metadata
+
+        Args:
+            metadata: Parsed metadata dictionary
+
+        Returns:
+            List of snapshot dictionaries
+        """
+        return metadata.get('snapshots', [])
+
+    @staticmethod
+    def get_snapshot_log(metadata: Dict) -> List[Dict]:
+        """
+        Get snapshot log from metadata
+
+        Args:
+            metadata: Parsed metadata dictionary
+
+        Returns:
+            List of snapshot log entries
+        """
+        return metadata.get('snapshot-log', [])
+
+
+class PathAbstractor:
+    """Handles path abstraction and restoration for backup/restore"""
+
+    @staticmethod
+    def abstract_path(full_path: str, table_location: str) -> str:
+        """
+        Abstract a full path by removing the table location prefix
+
+        Args:
+            full_path: Full path (e.g., s3://bucket/warehouse/db/table/metadata/snap-123.avro)
+            table_location: Table location (e.g., s3://bucket/warehouse/db/table)
+
+        Returns:
+            Abstracted relative path (e.g., metadata/snap-123.avro)
+        """
+        # Normalize paths - remove trailing slashes
+        table_location = table_location.rstrip('/')
+        full_path = full_path.rstrip('/')
+
+        # If the path starts with the table location, remove it
+        if full_path.startswith(table_location):
+            relative_path = full_path[len(table_location):].lstrip('/')
+            return relative_path
+
+        # If paths don't match, return as-is (might be a relative path already)
+        return full_path
+
+    @staticmethod
+    def restore_path(relative_path: str, new_table_location: str) -> str:
+        """
+        Restore a full path from relative path and new table location
+
+        Args:
+            relative_path: Relative path (e.g., metadata/snap-123.avro)
+            new_table_location: New table location (e.g., s3://bucket/warehouse/db/new_table)
+
+        Returns:
+            Full path with new table location
+        """
+        new_table_location = new_table_location.rstrip('/')
+        relative_path = relative_path.lstrip('/')
+        return f"{new_table_location}/{relative_path}"
+
+    @staticmethod
+    def abstract_snapshot_metadata(snapshot_content: Dict, table_location: str) -> Dict:
+        """
+        Abstract paths in a snapshot metadata file
+
+        Args:
+            snapshot_content: Parsed snapshot JSON content
+            table_location: Table location to abstract
+
+        Returns:
+            Modified snapshot with abstracted paths
+        """
+        abstracted = snapshot_content.copy()
+
+        # Abstract manifest list path
+        if 'manifest-list' in abstracted:
+            abstracted['manifest-list'] = PathAbstractor.abstract_path(
+                abstracted['manifest-list'], table_location
+            )
+
+        return abstracted
+
+    @staticmethod
+    def restore_snapshot_metadata(snapshot_content: Dict, new_table_location: str) -> Dict:
+        """
+        Restore paths in a snapshot metadata file
+
+        Args:
+            snapshot_content: Parsed snapshot JSON content with abstracted paths
+            new_table_location: New table location
+
+        Returns:
+            Modified snapshot with restored paths
+        """
+        restored = snapshot_content.copy()
+
+        # Restore manifest list path
+        if 'manifest-list' in restored:
+            restored['manifest-list'] = PathAbstractor.restore_path(
+                restored['manifest-list'], new_table_location
+            )
+
+        return restored
+
+    @staticmethod
+    def abstract_metadata_file(metadata_content: Dict, table_location: str) -> Dict:
+        """
+        Abstract paths in main metadata file
+
+        Args:
+            metadata_content: Parsed metadata JSON content
+            table_location: Table location to abstract
+
+        Returns:
+            Modified metadata with abstracted paths
+        """
+        abstracted = metadata_content.copy()
+
+        # Abstract location
+        if 'location' in abstracted:
+            abstracted['location'] = ''  # Will be set during restore
+
+        # Abstract snapshot metadata locations
+        if 'snapshots' in abstracted:
+            for snapshot in abstracted['snapshots']:
+                if 'manifest-list' in snapshot:
+                    snapshot['manifest-list'] = PathAbstractor.abstract_path(
+                        snapshot['manifest-list'], table_location
+                    )
+
+        # Clear snapshot log for MVP (as per spec, we assume no history)
+        abstracted['snapshot-log'] = []
+
+        # Abstract metadata log entries
+        if 'metadata-log' in abstracted:
+            for entry in abstracted['metadata-log']:
+                if 'metadata-file' in entry:
+                    entry['metadata-file'] = PathAbstractor.abstract_path(
+                        entry['metadata-file'], table_location
+                    )
+
+        return abstracted
+
+
+class ManifestFileHandler:
+    """Handles reading and writing Avro manifest files"""
+
+    @staticmethod
+    def read_manifest_list(content: bytes) -> List[Dict]:
+        """
+        Read an Avro manifest list file
+
+        Args:
+            content: Binary content of manifest list file
+
+        Returns:
+            List of manifest entries
+        """
+        entries = []
+        with BytesIO(content) as bio:
+            reader = avro.datafile.DataFileReader(bio, avro.io.DatumReader())
+            for record in reader:
+                entries.append(record)
+            reader.close()
+        return entries
+
+    @staticmethod
+    def write_manifest_list(entries: List[Dict], schema) -> bytes:
+        """
+        Write manifest entries to Avro format
+
+        Args:
+            entries: List of manifest entries
+            schema: Avro schema
+
+        Returns:
+            Binary content of manifest list file
+        """
+        output = BytesIO()
+        writer = avro.datafile.DataFileWriter(output, avro.io.DatumWriter(), schema)
+        for entry in entries:
+            writer.append(entry)
+        writer.flush()
+        # Get the value before closing
+        result = output.getvalue()
+        writer.close()
+        return result
+
+    @staticmethod
+    def _convert_bytes_to_str(obj):
+        """
+        Recursively convert bytes to base64 strings for JSON serialization
+        """
+        import base64
+
+        if isinstance(obj, bytes):
+            return {'__type__': 'bytes', '__value__': base64.b64encode(obj).decode('utf-8')}
+        elif isinstance(obj, dict):
+            return {k: ManifestFileHandler._convert_bytes_to_str(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [ManifestFileHandler._convert_bytes_to_str(item) for item in obj]
+        else:
+            return obj
+
+    @staticmethod
+    def _convert_str_to_bytes(obj):
+        """
+        Recursively convert base64 strings back to bytes for Avro serialization
+        """
+        import base64
+
+        if isinstance(obj, dict):
+            if obj.get('__type__') == 'bytes':
+                return base64.b64decode(obj['__value__'])
+            else:
+                return {k: ManifestFileHandler._convert_str_to_bytes(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [ManifestFileHandler._convert_str_to_bytes(item) for item in obj]
+        else:
+            return obj
+
+    @staticmethod
+    def abstract_manifest_paths(entries: List[Dict], table_location: str) -> List[Dict]:
+        """
+        Abstract paths in manifest list entries
+
+        Args:
+            entries: List of manifest entries
+            table_location: Table location to abstract
+
+        Returns:
+            Modified manifest entries with abstracted paths
+        """
+        abstracted = []
+        for entry in entries:
+            # Convert bytes to base64 strings for JSON serialization
+            entry_copy = ManifestFileHandler._convert_bytes_to_str(entry.copy())
+
+            if 'manifest_path' in entry_copy:
+                entry_copy['manifest_path'] = PathAbstractor.abstract_path(
+                    entry_copy['manifest_path'], table_location
+                )
+            abstracted.append(entry_copy)
+        return abstracted
+
+    @staticmethod
+    def restore_manifest_paths(entries: List[Dict], new_table_location: str) -> List[Dict]:
+        """
+        Restore paths in manifest list entries
+
+        Args:
+            entries: List of manifest entries with abstracted paths
+            new_table_location: New table location
+
+        Returns:
+            Modified manifest entries with restored paths
+        """
+        import copy
+        restored = []
+        for entry in entries:
+            entry_copy = copy.deepcopy(entry)
+            if 'manifest_path' in entry_copy:
+                entry_copy['manifest_path'] = PathAbstractor.restore_path(
+                    entry_copy['manifest_path'], new_table_location
+                )
+            restored.append(entry_copy)
+        return restored
+
+    @staticmethod
+    def abstract_manifest_paths_avro(entries: List[Dict], table_location: str) -> List[Dict]:
+        """
+        Abstract paths in manifest list entries (Avro format, no bytes conversion)
+
+        Args:
+            entries: List of manifest entries
+            table_location: Table location to abstract
+
+        Returns:
+            Modified manifest entries with abstracted paths
+        """
+        import copy
+        abstracted = []
+        for entry in entries:
+            entry_copy = copy.deepcopy(entry)
+            if 'manifest_path' in entry_copy:
+                entry_copy['manifest_path'] = PathAbstractor.abstract_path(
+                    entry_copy['manifest_path'], table_location
+                )
+            abstracted.append(entry_copy)
+        return abstracted
+
+    @staticmethod
+    def read_manifest_file(content: bytes) -> Tuple[List[Dict], any]:
+        """
+        Read an Avro manifest file
+
+        Args:
+            content: Binary content of manifest file
+
+        Returns:
+            Tuple of (list of data file entries, schema)
+        """
+        entries = []
+        schema = None
+        with BytesIO(content) as bio:
+            reader = avro.datafile.DataFileReader(bio, avro.io.DatumReader())
+            # Get the schema from the Avro file's metadata
+            # The schema is stored in the meta dictionary with key 'avro.schema'
+            schema_str = reader.meta.get('avro.schema')
+            if schema_str:
+                schema = avro.schema.parse(schema_str.decode('utf-8') if isinstance(schema_str, bytes) else schema_str)
+            for record in reader:
+                entries.append(record)
+            reader.close()
+        return entries, schema
+
+    @staticmethod
+    def abstract_manifest_data_paths(entries: List[Dict], table_location: str) -> List[Dict]:
+        """
+        Abstract data file paths in manifest entries
+
+        Args:
+            entries: List of manifest data entries
+            table_location: Table location to abstract
+
+        Returns:
+            Modified manifest entries with abstracted data file paths
+        """
+        abstracted = []
+        for entry in entries:
+            # Convert bytes to base64 strings for JSON serialization
+            entry_copy = ManifestFileHandler._convert_bytes_to_str(entry.copy())
+
+            if 'data_file' in entry_copy and 'file_path' in entry_copy['data_file']:
+                entry_copy['data_file']['file_path'] = PathAbstractor.abstract_path(
+                    entry_copy['data_file']['file_path'], table_location
+                )
+            abstracted.append(entry_copy)
+        return abstracted
+
+    @staticmethod
+    def restore_manifest_data_paths(entries: List[Dict], new_table_location: str) -> List[Dict]:
+        """
+        Restore data file paths in manifest entries
+
+        Args:
+            entries: List of manifest data entries with abstracted paths
+            new_table_location: New table location
+
+        Returns:
+            Modified manifest entries with restored data file paths
+        """
+        import copy
+        restored = []
+        for entry in entries:
+            entry_copy = copy.deepcopy(entry)
+            if 'data_file' in entry_copy and 'file_path' in entry_copy['data_file']:
+                entry_copy['data_file']['file_path'] = PathAbstractor.restore_path(
+                    entry_copy['data_file']['file_path'], new_table_location
+                )
+            restored.append(entry_copy)
+        return restored
+
+    @staticmethod
+    def abstract_manifest_data_paths_avro(entries: List[Dict], table_location: str) -> List[Dict]:
+        """
+        Abstract data file paths in manifest entries (Avro format, no bytes conversion)
+
+        Args:
+            entries: List of manifest data entries
+            table_location: Table location to abstract
+
+        Returns:
+            Modified manifest entries with abstracted data file paths
+        """
+        import copy
+        abstracted = []
+        for entry in entries:
+            entry_copy = copy.deepcopy(entry)
+            if 'data_file' in entry_copy and 'file_path' in entry_copy['data_file']:
+                entry_copy['data_file']['file_path'] = PathAbstractor.abstract_path(
+                    entry_copy['data_file']['file_path'], table_location
+                )
+            abstracted.append(entry_copy)
+        return abstracted

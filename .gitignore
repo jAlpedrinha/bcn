@@ -1,0 +1,34 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+venv/
+env/
+
+# uv
+.uv/
+uv.lock
+
+# Environment
+.env.local
+# Keep example files in version control
+!.env.local.example
+!.env.aws.example
+
+# Project-specific
+docker/minio-data/
+
+# Derby/Metastore (should not be created locally with the fix)
+metastore_db/
+derby.log
+
+# Spark local warehouse (should not be created with proper catalog config)
+spark-warehouse/
+.pytest_cache/
+.claude/

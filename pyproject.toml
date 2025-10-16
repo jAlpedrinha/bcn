@@ -1,0 +1,97 @@
+[project]
+name = "bcn"
+version = "0.1.0"
+description = "Backup and restore solution for Apache Iceberg tables"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Iceberg Snapshots Contributors"}
+]
+
+dependencies = [
+    # AWS/S3 SDK
+    "boto3>=1.26.0",
+    "botocore>=1.29.0",
+    # Hive Metastore client
+    "PyHive>=0.6.5",
+    "thrift>=0.16.0",
+    "thrift-sasl>=0.4.3",
+    # Avro for reading manifest files
+    "avro-python3>=1.10.2",
+    # Spark
+    "pyspark>=3.5.0,<4.0.0",
+    # Testing
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "docker>=6.1.0",
+    # General utilities
+    "requests>=2.28.0",
+    "ruff>=0.14.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "ruff>=0.1.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bcn"]
+
+[tool.pytest.ini_options]
+# Pytest configuration
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+    "--color=yes",
+]
+markers = [
+    "e2e: End-to-end tests",
+    "unit: Unit tests",
+    "integration: Integration tests",
+    "slow: Slow running tests",
+]
+log_cli = true
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s [%(levelname)8s] %(message)s"
+log_cli_date_format = "%Y-%m-%d %H:%M:%S"
+pythonpath = "."
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# Enable PEP 8 style checks and common Python best practices
+select = [
+    "E",   # pycodestyle errors (PEP 8)
+    "W",   # pycodestyle warnings (PEP 8)
+    "F",   # pyflakes (unused imports, variables, etc.)
+    "I",   # isort (import sorting)
+    "N",   # pep8-naming (naming conventions)
+    "UP",  # pyupgrade (modern Python syntax)
+    "B",   # flake8-bugbear (common bugs)
+    "C4",  # flake8-comprehensions (better list/dict/set comprehensions)
+    "SIM", # flake8-simplify (simplification suggestions)
+]
+ignore = [
+    "E501",  # Line too long (handled by formatter)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]  # Allow assert statements in tests
+
+[tool.ruff.lint.isort]
+known-first-party = ["bcn"]
