@@ -159,7 +159,7 @@ python restore.py \
 ## Project Structure
 
 ```
-iceberg-snapshots/
+bcn/
  src/                      # Python source code
     backup.py            # Backup orchestrator
     restore.py           # Restore orchestrator

@@ -24,11 +24,7 @@ uv.lock
 # Project-specific
 docker/minio-data/
 
-# Derby/Metastore (should not be created locally with the fix)
-metastore_db/
-derby.log
 
-# Spark local warehouse (should not be created with proper catalog config)
-spark-warehouse/
 .pytest_cache/
 .claude/
+.ruff_cache

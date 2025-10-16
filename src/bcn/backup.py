@@ -5,6 +5,7 @@ Iceberg Table Backup Script
 Creates a backup of an Iceberg table by copying metadata and data files
 to a backup location with abstracted paths.
 """
+
 import argparse
 import json
 import os
@@ -36,8 +37,8 @@ class IcebergBackup:
         self.s3_client = S3Client()
         self.spark_client = SparkClient(app_name=f"iceberg-backup-{backup_name}")
         self.work_dir = os.path.join(Config.WORK_DIR, backup_name)
-        self.metadata_dir = os.path.join(self.work_dir, 'metadata')
-        self.data_dir = os.path.join(self.work_dir, 'data')
+        self.metadata_dir = os.path.join(self.work_dir, "metadata")
+        self.data_dir = os.path.join(self.work_dir, "data")
 
     def create_backup(self) -> bool:
         """
@@ -56,8 +57,8 @@ class IcebergBackup:
                 print(f"Error: Could not retrieve metadata for {self.database}.{self.table}")
                 return False
 
-            table_location = table_metadata['location']
-            metadata_location = table_metadata.get('metadata_location')
+            table_location = table_metadata["location"]
+            metadata_location = table_metadata.get("metadata_location")
 
             if not metadata_location:
                 print(f"Error: No metadata_location found for {self.database}.{self.table}")
@@ -75,7 +76,7 @@ class IcebergBackup:
                 print(f"Error: Could not read metadata file from {metadata_location}")
                 return False
 
-            metadata = json.loads(metadata_content.decode('utf-8'))
+            metadata = json.loads(metadata_content.decode("utf-8"))
             print(f"  Current snapshot ID: {metadata.get('current-snapshot-id')}")
 
             # Step 3: Abstract paths in metadata
@@ -106,19 +107,23 @@ class IcebergBackup:
                     if content:
                         entries, _ = ManifestFileHandler.read_manifest_file(content)
                         for entry in entries:
-                            manifest_path = entry.get('manifest_path')
+                            manifest_path = entry.get("manifest_path")
                             if not manifest_path:
                                 continue
 
                             # Convert relative manifest path to full S3 URI
-                            if not manifest_path.startswith('s3://') and not manifest_path.startswith('s3a://'):
+                            if not manifest_path.startswith(
+                                "s3://"
+                            ) and not manifest_path.startswith("s3a://"):
                                 full_manifest_path = f"{table_location}/{manifest_path}"
                             else:
                                 full_manifest_path = manifest_path
 
                             # Store individual manifest path
                             print(f"    Found individual manifest: {manifest_path}")
-                            manifest_relative_path = PathAbstractor.abstract_path(full_manifest_path, table_location)
+                            manifest_relative_path = PathAbstractor.abstract_path(
+                                full_manifest_path, table_location
+                            )
                             if manifest_relative_path not in individual_manifest_paths:
                                 individual_manifest_paths.append(manifest_relative_path)
                 except Exception as e:
@@ -132,19 +137,19 @@ class IcebergBackup:
             # Step 7: Save backup metadata
             print("\nStep 7: Saving backup metadata...")
             backup_metadata = {
-                'original_database': self.database,
-                'original_table': self.table,
-                'original_location': table_location,
-                'backup_name': self.backup_name,
-                'abstracted_metadata': abstracted_metadata,
-                'manifest_lists': manifest_list_paths,
-                'individual_manifests': individual_manifest_paths,
-                'data_files': [PathAbstractor.abstract_path(f, table_location) for f in data_files]
+                "original_database": self.database,
+                "original_table": self.table,
+                "original_location": table_location,
+                "backup_name": self.backup_name,
+                "abstracted_metadata": abstracted_metadata,
+                "manifest_lists": manifest_list_paths,
+                "individual_manifests": individual_manifest_paths,
+                "data_files": [PathAbstractor.abstract_path(f, table_location) for f in data_files],
             }
 
             # Save to local work directory
-            backup_metadata_path = os.path.join(self.work_dir, 'backup_metadata.json')
-            with open(backup_metadata_path, 'w') as f:
+            backup_metadata_path = os.path.join(self.work_dir, "backup_metadata.json")
+            with open(backup_metadata_path, "w") as f:
                 json.dump(backup_metadata, f, indent=2)
 
             # Step 8: Upload to backup bucket
@@ -167,6 +172,7 @@ class IcebergBackup:
         except Exception as e:
             print(f"Error during backup: {e}")
             import traceback
+
             traceback.print_exc()
             return False
         # Note: Not closing spark_client here as it may be shared with other processes
@@ -176,54 +182,18 @@ class IcebergBackup:
         """Collect all manifest file paths from metadata"""
         manifest_files = []
 
-        for snapshot in metadata.get('snapshots', []):
-            if 'manifest-list' in snapshot:
-                manifest_list_path = snapshot['manifest-list']
+        for snapshot in metadata.get("snapshots", []):
+            if "manifest-list" in snapshot:
+                manifest_list_path = snapshot["manifest-list"]
                 # Convert relative paths to full S3 URIs
-                if not manifest_list_path.startswith('s3://') and not manifest_list_path.startswith('s3a://'):
+                if not manifest_list_path.startswith("s3://") and not manifest_list_path.startswith(
+                    "s3a://"
+                ):
                     # Relative path - combine with table location
                     manifest_list_path = f"{table_location}/{manifest_list_path}"
                 manifest_files.append(manifest_list_path)
 
         return manifest_files
-
-    def _process_manifest_file(self, manifest_path: str, table_location: str) -> Dict:
-        """Download and abstract a manifest file"""
-        try:
-            # Download manifest file
-            bucket, key = self.s3_client.parse_s3_uri(manifest_path)
-            content = self.s3_client.read_object(bucket, key)
-            if not content:
-                print(f"  Warning: Could not read manifest file {manifest_path}")
-                return None
-
-            # Check if it's a manifest list (Avro) or regular manifest
-            try:
-                # Try to read as Avro manifest list
-                entries, schema = ManifestFileHandler.read_manifest_file(content)
-                abstracted_entries = ManifestFileHandler.abstract_manifest_data_paths(
-                    entries, table_location
-                )
-                return {
-                    'type': 'avro',
-                    'entries': abstracted_entries,
-                    'schema': str(schema)  # Convert schema to string for JSON serialization
-                }
-            except Exception:
-                # If not Avro, might be JSON
-                try:
-                    manifest_json = json.loads(content.decode('utf-8'))
-                    return {
-                        'type': 'json',
-                        'content': manifest_json
-                    }
-                except Exception:
-                    print(f"  Warning: Could not parse manifest file {manifest_path}")
-                    return None
-
-        except Exception as e:
-            print(f"  Error processing manifest file {manifest_path}: {e}")
-            return None
 
     def _collect_data_files(self, manifest_list_files: List[str], table_location: str) -> List[str]:
         """Collect all data file paths from manifest list files"""
@@ -245,12 +215,14 @@ class IcebergBackup:
                 # Now read each manifest file to get data files
                 for entry in manifest_list_entries:
                     # Manifest list entries have a 'manifest_path' field
-                    manifest_path = entry.get('manifest_path')
+                    manifest_path = entry.get("manifest_path")
                     if not manifest_path:
                         continue
 
                     # Convert relative manifest path to full S3 URI
-                    if not manifest_path.startswith('s3://') and not manifest_path.startswith('s3a://'):
+                    if not manifest_path.startswith("s3://") and not manifest_path.startswith(
+                        "s3a://"
+                    ):
                         manifest_path = f"{table_location}/{manifest_path}"
 
                     try:
@@ -263,8 +235,8 @@ class IcebergBackup:
                         # Get data files from the manifest
                         manifest_entries, _ = ManifestFileHandler.read_manifest_file(m_content)
                         for m_entry in manifest_entries:
-                            if 'data_file' in m_entry and 'file_path' in m_entry['data_file']:
-                                data_files.append(m_entry['data_file']['file_path'])
+                            if "data_file" in m_entry and "file_path" in m_entry["data_file"]:
+                                data_files.append(m_entry["data_file"]["file_path"])
                     except Exception as e:
                         print(f"  Warning: Could not read manifest file {manifest_path}: {e}")
                         continue
@@ -282,20 +254,26 @@ class IcebergBackup:
 
             # Upload backup metadata
             metadata_key = f"{backup_prefix}backup_metadata.json"
-            metadata_content = json.dumps(backup_metadata, indent=2).encode('utf-8')
-            if not self.s3_client.write_object(Config.BACKUP_BUCKET, metadata_key, metadata_content):
+            metadata_content = json.dumps(backup_metadata, indent=2).encode("utf-8")
+            if not self.s3_client.write_object(
+                Config.BACKUP_BUCKET, metadata_key, metadata_content
+            ):
                 return False
             print("  ✓ Uploaded backup metadata")
 
             # Upload abstracted metadata file
             iceberg_metadata_key = f"{backup_prefix}metadata.json"
-            iceberg_content = json.dumps(backup_metadata['abstracted_metadata'], indent=2).encode('utf-8')
-            if not self.s3_client.write_object(Config.BACKUP_BUCKET, iceberg_metadata_key, iceberg_content):
+            iceberg_content = json.dumps(backup_metadata["abstracted_metadata"], indent=2).encode(
+                "utf-8"
+            )
+            if not self.s3_client.write_object(
+                Config.BACKUP_BUCKET, iceberg_metadata_key, iceberg_content
+            ):
                 return False
             print("  ✓ Uploaded Iceberg metadata")
 
             # Copy manifest list files as raw Avro
-            manifest_lists = backup_metadata.get('manifest_lists', [])
+            manifest_lists = backup_metadata.get("manifest_lists", [])
             for relative_path in manifest_lists:
                 full_path = f"{table_location}/{relative_path}"
                 try:
@@ -305,14 +283,16 @@ class IcebergBackup:
                     if content:
                         # Upload raw Avro to backup
                         manifest_key = f"{backup_prefix}{relative_path}"
-                        if not self.s3_client.write_object(Config.BACKUP_BUCKET, manifest_key, content):
+                        if not self.s3_client.write_object(
+                            Config.BACKUP_BUCKET, manifest_key, content
+                        ):
                             print(f"  Warning: Failed to upload manifest list {relative_path}")
                 except Exception as e:
                     print(f"  Warning: Could not copy manifest list {relative_path}: {e}")
             print(f"  ✓ Uploaded {len(manifest_lists)} manifest list files")
 
             # Copy individual manifest files as raw Avro
-            individual_manifests = backup_metadata.get('individual_manifests', [])
+            individual_manifests = backup_metadata.get("individual_manifests", [])
             for relative_path in individual_manifests:
                 full_path = f"{table_location}/{relative_path}"
                 try:
@@ -322,8 +302,12 @@ class IcebergBackup:
                     if content:
                         # Upload raw Avro to backup
                         manifest_key = f"{backup_prefix}{relative_path}"
-                        if not self.s3_client.write_object(Config.BACKUP_BUCKET, manifest_key, content):
-                            print(f"  Warning: Failed to upload individual manifest {relative_path}")
+                        if not self.s3_client.write_object(
+                            Config.BACKUP_BUCKET, manifest_key, content
+                        ):
+                            print(
+                                f"  Warning: Failed to upload individual manifest {relative_path}"
+                            )
                 except Exception as e:
                     print(f"  Warning: Could not copy individual manifest {relative_path}: {e}")
             print(f"  ✓ Uploaded {len(individual_manifests)} individual manifest files")
@@ -340,24 +324,10 @@ class IcebergBackup:
 
 def main():
     """Main entry point for backup script"""
-    parser = argparse.ArgumentParser(
-        description='Create a backup of an Iceberg table'
-    )
-    parser.add_argument(
-        '--database',
-        required=True,
-        help='Database name'
-    )
-    parser.add_argument(
-        '--table',
-        required=True,
-        help='Table name'
-    )
-    parser.add_argument(
-        '--backup-name',
-        required=True,
-        help='Name for this backup'
-    )
+    parser = argparse.ArgumentParser(description="Create a backup of an Iceberg table")
+    parser.add_argument("--database", required=True, help="Database name")
+    parser.add_argument("--table", required=True, help="Table name")
+    parser.add_argument("--backup-name", required=True, help="Name for this backup")
 
     args = parser.parse_args()
 
@@ -368,5 +338,5 @@ def main():
     sys.exit(0 if success else 1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

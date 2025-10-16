@@ -1,6 +1,7 @@
 """
 End-to-End tests for Iceberg backup and restore
 """
+
 import pytest
 
 from bcn.backup import IcebergBackup
@@ -13,12 +14,7 @@ from bcn.restore import IcebergRestore
 class TestBackupRestore:
     """End-to-end tests for backup and restore workflow"""
 
-    def test_complete_backup_restore_workflow(
-        self,
-        spark_session,
-        source_table,
-        backup_name
-    ):
+    def test_complete_backup_restore_workflow(self, spark_session, source_table, backup_name):
         """
         Test the complete backup and restore workflow
 
@@ -28,15 +24,16 @@ class TestBackupRestore:
         3. Restores to a new table
         4. Validates data integrity
         """
-        database = source_table['database']
-        table = source_table['table']
-        expected_data = source_table['data']
+        database = source_table["database"]
+        table = source_table["table"]
+        expected_data = source_table["data"]
 
         # Step 1: Verify source table has data
         source_data = spark_session.query_table(database, table)
         assert source_data is not None, "Failed to query source table"
-        assert len(source_data) == len(expected_data), \
+        assert len(source_data) == len(expected_data), (
             f"Source table has {len(source_data)} rows, expected {len(expected_data)}"
+        )
 
         print(f"\n✓ Source table verified: {len(source_data)} rows")
 
@@ -58,7 +55,7 @@ class TestBackupRestore:
             target_database=database,
             target_table=target_table,
             target_location=target_location,
-            catalog_type='hive'
+            catalog_type="hive",
         )
         restore_success = restore.restore_backup()
 
@@ -70,8 +67,9 @@ class TestBackupRestore:
         restored_data = spark_session.query_table(database, target_table)
 
         assert restored_data is not None, "Failed to query restored table"
-        assert len(restored_data) == len(source_data), \
+        assert len(restored_data) == len(source_data), (
             f"Restored table has {len(restored_data)} rows, expected {len(source_data)}"
+        )
 
         print(f"✓ Row count matches: {len(restored_data)} rows")
 
@@ -81,17 +79,12 @@ class TestBackupRestore:
 
         print("\n✓ All data matches - backup and restore successful!")
 
-    def test_backup_preserves_schema(
-        self,
-        spark_session,
-        source_table,
-        backup_name
-    ):
+    def test_backup_preserves_schema(self, spark_session, source_table, backup_name):
         """
         Test that backup preserves table schema correctly
         """
-        database = source_table['database']
-        table = source_table['table']
+        database = source_table["database"]
+        table = source_table["table"]
 
         # Create backup
         backup = IcebergBackup(database, table, f"{backup_name}_schema")
@@ -105,7 +98,7 @@ class TestBackupRestore:
             backup_name=f"{backup_name}_schema",
             target_database=database,
             target_table=target_table,
-            target_location=target_location
+            target_location=target_location,
         )
         assert restore.restore_backup(), "Restore failed"
 
@@ -120,21 +113,18 @@ class TestBackupRestore:
             source_columns = set(source_data[0].keys())
             restored_columns = set(restored_data[0].keys())
 
-            assert source_columns == restored_columns, \
+            assert source_columns == restored_columns, (
                 f"Schema mismatch: source={source_columns}, restored={restored_columns}"
+            )
 
             print(f"✓ Schema preserved: {source_columns}")
 
-    def test_multiple_backups(
-        self,
-        spark_session,
-        source_table
-    ):
+    def test_multiple_backups(self, spark_session, source_table):
         """
         Test creating multiple backups from the same source table
         """
-        database = source_table['database']
-        table = source_table['table']
+        database = source_table["database"]
+        table = source_table["table"]
 
         # Create two backups
         backup1 = IcebergBackup(database, table, "backup_1")
@@ -152,7 +142,7 @@ class TestBackupRestore:
                 backup_name=backup_name,
                 target_database=database,
                 target_table=target_table,
-                target_location=target_location
+                target_location=target_location,
             )
             assert restore.restore_backup(), f"Restore of {backup_name} failed"
 
@@ -177,11 +167,9 @@ class TestBackupRestore:
 
         for i, (source_row, restored_row) in enumerate(zip(source_data, restored_data)):
             if not self._compare_rows(source_row, restored_row):
-                mismatches.append({
-                    'row_number': i + 1,
-                    'source': source_row,
-                    'restored': restored_row
-                })
+                mismatches.append(
+                    {"row_number": i + 1, "source": source_row, "restored": restored_row}
+                )
 
         if mismatches:
             print(f"\n✗ Found {len(mismatches)} mismatched rows:")
@@ -220,9 +208,9 @@ class TestBackupRestore:
                 continue
 
             # Convert timestamps to strings for comparison
-            if hasattr(val1, 'isoformat'):
+            if hasattr(val1, "isoformat"):
                 val1 = val1.isoformat()
-            if hasattr(val2, 'isoformat'):
+            if hasattr(val2, "isoformat"):
                 val2 = val2.isoformat()
 
             # Compare values
@@ -256,7 +244,7 @@ class TestRestoreErrors:
             backup_name="nonexistent_backup",
             target_database="default",
             target_table="should_fail",
-            target_location="s3a://warehouse/default/should_fail"
+            target_location="s3a://warehouse/default/should_fail",
         )
         result = restore.restore_backup()
 

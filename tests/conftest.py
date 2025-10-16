@@ -1,6 +1,7 @@
 """
 Pytest configuration and fixtures for Iceberg Snapshots tests
 """
+
 import os
 import sys
 from datetime import datetime
@@ -8,7 +9,7 @@ from datetime import datetime
 import pytest
 
 # Add src to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from bcn.config import Config
 from bcn.spark_client import SparkClient
@@ -27,8 +28,8 @@ def infrastructure():
 
     # Only check infrastructure if NOT running inside a container
     # (test_runner.sh already checks infrastructure before running tests)
-    if os.getenv('RUNNING_IN_CONTAINER') != 'true' and not manager.ensure_infrastructure_ready():
-            pytest.skip("Infrastructure is not ready. Start with: docker-compose up -d")
+    if os.getenv("RUNNING_IN_CONTAINER") != "true" and not manager.ensure_infrastructure_ready():
+        pytest.skip("Infrastructure is not ready. Start with: docker-compose up -d")
 
     yield manager
 
@@ -38,7 +39,7 @@ def spark_session(infrastructure):
     """
     Session-scoped Spark client fixture
     """
-    client = SparkClient(app_name="iceberg-snapshots-test")
+    client = SparkClient(app_name="bcn-test")
     yield client
     client.close()
 
@@ -113,31 +114,24 @@ def source_table(spark_session, clean_database, test_table_name, sample_data, ta
 
     # Create table
     success = spark_session.create_table(
-        clean_database,
-        test_table_name,
-        table_schema,
-        table_location
+        clean_database, test_table_name, table_schema, table_location
     )
 
     if not success:
         pytest.fail(f"Failed to create source table {clean_database}.{test_table_name}")
 
     # Insert sample data
-    success = spark_session.insert_data(
-        clean_database,
-        test_table_name,
-        sample_data
-    )
+    success = spark_session.insert_data(clean_database, test_table_name, sample_data)
 
     if not success:
         pytest.fail(f"Failed to insert data into {clean_database}.{test_table_name}")
 
     # Return table info
     return {
-        'database': clean_database,
-        'table': test_table_name,
-        'location': table_location,
-        'data': sample_data
+        "database": clean_database,
+        "table": test_table_name,
+        "location": table_location,
+        "data": sample_data,
     }
 
 
@@ -146,18 +140,10 @@ def pytest_configure(config):
     Pytest configuration hook
     """
     # Add custom markers
-    config.addinivalue_line(
-        "markers", "e2e: mark test as end-to-end test"
-    )
-    config.addinivalue_line(
-        "markers", "integration: mark test as integration test"
-    )
-    config.addinivalue_line(
-        "markers", "unit: mark test as unit test"
-    )
-    config.addinivalue_line(
-        "markers", "slow: mark test as slow running"
-    )
+    config.addinivalue_line("markers", "e2e: mark test as end-to-end test")
+    config.addinivalue_line("markers", "integration: mark test as integration test")
+    config.addinivalue_line("markers", "unit: mark test as unit test")
+    config.addinivalue_line("markers", "slow: mark test as slow running")
 
 
 def pytest_collection_modifyitems(config, items):

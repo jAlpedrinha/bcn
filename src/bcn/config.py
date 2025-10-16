@@ -1,6 +1,7 @@
 """
 Configuration for Iceberg Snapshot Backup/Restore
 """
+
 import os
 
 
@@ -40,14 +41,14 @@ class Config:
     def get_s3_config(cls):
         """Get S3 configuration as a dictionary"""
         config = {
-            'aws_access_key_id': cls.S3_ACCESS_KEY,
-            'aws_secret_access_key': cls.S3_SECRET_KEY,
-            'region_name': cls.S3_REGION
+            "aws_access_key_id": cls.S3_ACCESS_KEY,
+            "aws_secret_access_key": cls.S3_SECRET_KEY,
+            "region_name": cls.S3_REGION,
         }
 
         # Only add endpoint_url if it's set (for MinIO)
         # AWS S3 should not have an endpoint_url
         if cls.S3_ENDPOINT and cls.S3_ENDPOINT.strip():
-            config['endpoint_url'] = cls.S3_ENDPOINT
+            config["endpoint_url"] = cls.S3_ENDPOINT
 
         return config

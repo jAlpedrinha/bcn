@@ -5,3 +5,5 @@ There are some study documents on the study folder. They dont represent actual d
 The code should be created under src/ folder and it should be python.
 
 Before creating a file, assess if it should belong in any of the existing folders rather than the root folder.
+
+We must support both the local stack we have in docker-compose.yml and AWS Stack using Glue instead of hive catalog and AWS S3 instead of minio.

@@ -57,7 +57,7 @@ echo -e "${GREEN}✓ Python dependencies installed${NC}"
 
 # Step 4: Download Iceberg JARs
 echo -e "\n${BLUE}Step 4: Setting up Iceberg JARs...${NC}"
-JARS_DIR="$HOME/.iceberg-snapshots/jars"
+JARS_DIR="$HOME/.bcn/jars"
 mkdir -p "$JARS_DIR"
 
 ICEBERG_VERSION="1.4.3"

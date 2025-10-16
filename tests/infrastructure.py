@@ -1,6 +1,7 @@
 """
 Infrastructure management utilities for tests
 """
+
 import time
 from typing import Dict, List
 
@@ -33,7 +34,7 @@ class InfrastructureManager:
 
         try:
             container = self.client.containers.get(container_name)
-            return container.status == 'running'
+            return container.status == "running"
         except docker.errors.NotFound:
             return False
         except Exception as e:
@@ -57,13 +58,13 @@ class InfrastructureManager:
             container = self.client.containers.get(container_name)
 
             # Check if container is running
-            if container.status != 'running':
+            if container.status != "running":
                 return False
 
             # Check health status if available
-            health = container.attrs.get('State', {}).get('Health', {})
+            health = container.attrs.get("State", {}).get("Health", {})
             if health:
-                return health.get('Status') == 'healthy'
+                return health.get("Status") == "healthy"
 
             # If no health check, consider running as healthy
             return True
@@ -123,12 +124,7 @@ class InfrastructureManager:
             True if all services are ready, False otherwise
         """
         if required_services is None:
-            required_services = [
-                'minio',
-                'postgres-hive',
-                'hive-metastore',
-                'spark-iceberg'
-            ]
+            required_services = ["minio", "postgres-hive", "hive-metastore", "spark-iceberg"]
 
         print("Checking infrastructure status...")
 
@@ -146,7 +142,7 @@ class InfrastructureManager:
                 print(f"  {symbol} {service}")
             return False
 
-    def start_infrastructure(self, compose_file: str = 'docker-compose.yml') -> bool:
+    def start_infrastructure(self, compose_file: str = "docker-compose.yml") -> bool:
         """
         Start infrastructure using docker-compose
 
@@ -162,16 +158,13 @@ class InfrastructureManager:
 
         try:
             subprocess.run(
-                ['docker-compose', 'up', '-d'],
-                capture_output=True,
-                text=True,
-                check=True
+                ["docker-compose", "up", "-d"], capture_output=True, text=True, check=True
             )
 
             print("Infrastructure started, waiting for services to be healthy...")
 
             # Wait for critical services
-            services_to_wait = ['hive-metastore', 'minio']
+            services_to_wait = ["hive-metastore", "minio"]
             return all(self.wait_for_healthy(service, timeout=300) for service in services_to_wait)
 
         except subprocess.CalledProcessError as e:

@@ -1,6 +1,7 @@
 """
 Spark client for Iceberg table operations
 """
+
 from typing import Dict, List, Optional
 
 from bcn.config import Config
@@ -9,7 +10,7 @@ from bcn.config import Config
 class SparkClient:
     """Client for interacting with Spark and Iceberg tables"""
 
-    def __init__(self, app_name: str = "iceberg-snapshots"):
+    def __init__(self, app_name: str = "bcn"):
         """
         Initialize Spark client
 
@@ -31,40 +32,59 @@ class SparkClient:
             builder = SparkSession.builder.appName(self.app_name)
 
             # Common Spark catalog configuration
-            builder = builder \
-                .config(f"spark.sql.catalog.{catalog_name}", "org.apache.iceberg.spark.SparkCatalog") \
-                .config(f"spark.sql.catalog.{catalog_name}.type", catalog_type) \
-                .config(f"spark.sql.catalog.{catalog_name}.warehouse", f"s3a://{Config.WAREHOUSE_BUCKET}/") \
-                .config(f"spark.sql.catalog.{catalog_name}.io-impl", "org.apache.iceberg.aws.s3.S3FileIO") \
-                .config("spark.sql.defaultCatalog", catalog_name) \
-                .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
+            builder = (
+                builder.config(
+                    f"spark.sql.catalog.{catalog_name}", "org.apache.iceberg.spark.SparkCatalog"
+                )
+                .config(f"spark.sql.catalog.{catalog_name}.type", catalog_type)
+                .config(
+                    f"spark.sql.catalog.{catalog_name}.warehouse",
+                    f"s3a://{Config.WAREHOUSE_BUCKET}/",
+                )
+                .config(
+                    f"spark.sql.catalog.{catalog_name}.io-impl",
+                    "org.apache.iceberg.aws.s3.S3FileIO",
+                )
+                .config("spark.sql.defaultCatalog", catalog_name)
+                .config(
+                    "spark.sql.extensions",
+                    "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+                )
+            )
 
             # Catalog-specific configuration
             if catalog_type == "hive":
                 # Hive metastore configuration
-                builder = builder.config(f"spark.sql.catalog.{catalog_name}.uri", Config.HIVE_METASTORE_URI)
+                builder = builder.config(
+                    f"spark.sql.catalog.{catalog_name}.uri", Config.HIVE_METASTORE_URI
+                )
             elif catalog_type == "glue":
                 # AWS Glue configuration - uses AWS SDK defaults
                 # Glue catalog uses AWS credentials from environment or IAM roles
                 pass
 
             # S3 configuration for Iceberg catalog
-            builder = builder \
-                .config(f"spark.sql.catalog.{catalog_name}.s3.access-key-id", Config.S3_ACCESS_KEY) \
-                .config(f"spark.sql.catalog.{catalog_name}.s3.secret-access-key", Config.S3_SECRET_KEY)
+            builder = builder.config(
+                f"spark.sql.catalog.{catalog_name}.s3.access-key-id", Config.S3_ACCESS_KEY
+            ).config(f"spark.sql.catalog.{catalog_name}.s3.secret-access-key", Config.S3_SECRET_KEY)
 
             # S3 endpoint and path-style access (only for MinIO/custom S3)
             if Config.S3_ENDPOINT and Config.S3_ENDPOINT.strip():
-                builder = builder.config(f"spark.sql.catalog.{catalog_name}.s3.endpoint", Config.S3_ENDPOINT)
+                builder = builder.config(
+                    f"spark.sql.catalog.{catalog_name}.s3.endpoint", Config.S3_ENDPOINT
+                )
 
             if Config.S3_PATH_STYLE_ACCESS:
-                builder = builder.config(f"spark.sql.catalog.{catalog_name}.s3.path-style-access", "true")
+                builder = builder.config(
+                    f"spark.sql.catalog.{catalog_name}.s3.path-style-access", "true"
+                )
 
             # Hadoop S3A configuration (for direct S3 access)
-            builder = builder \
-                .config("spark.hadoop.fs.s3a.access.key", Config.S3_ACCESS_KEY) \
-                .config("spark.hadoop.fs.s3a.secret.key", Config.S3_SECRET_KEY) \
+            builder = (
+                builder.config("spark.hadoop.fs.s3a.access.key", Config.S3_ACCESS_KEY)
+                .config("spark.hadoop.fs.s3a.secret.key", Config.S3_SECRET_KEY)
                 .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+            )
 
             # Hadoop S3A endpoint and path-style (only for MinIO/custom S3)
             if Config.S3_ENDPOINT and Config.S3_ENDPOINT.strip():
@@ -95,7 +115,7 @@ class SparkClient:
             df = spark.sql(sql)
 
             # If it's a SELECT query, return results
-            if sql.strip().upper().startswith('SELECT'):
+            if sql.strip().upper().startswith("SELECT"):
                 rows = df.collect()
                 return [row.asDict() for row in rows]
             else:
@@ -105,6 +125,7 @@ class SparkClient:
         except Exception as e:
             print(f"Error executing SQL: {e}")
             import traceback
+
             traceback.print_exc()
             return None
 
@@ -239,7 +260,7 @@ class SparkClient:
             sql = f"SELECT COUNT(*) as count FROM {self.catalog_name}.{database}.{table}"
             result = self.execute_sql(sql)
             if result and len(result) > 0:
-                return result[0]['count']
+                return result[0]["count"]
             return None
         except Exception as e:
             print(f"Error getting row count from {database}.{table}: {e}")
@@ -259,7 +280,7 @@ class SparkClient:
             sql = f"SHOW TABLES IN {self.catalog_name}.{database}"
             result = self.execute_sql(sql)
             if result:
-                return [row['tableName'] for row in result]
+                return [row["tableName"] for row in result]
             return []
         except Exception as e:
             print(f"Error listing tables in {database}: {e}")
@@ -300,16 +321,15 @@ class SparkClient:
         try:
             spark = self.get_spark_session()
 
-            metadata = {
-                'database': database,
-                'table': table
-            }
+            metadata = {"database": database, "table": table}
 
             # Get table location using DESCRIBE FORMATTED
-            desc_result = spark.sql(f"DESCRIBE FORMATTED {self.catalog_name}.{database}.{table}").collect()
+            desc_result = spark.sql(
+                f"DESCRIBE FORMATTED {self.catalog_name}.{database}.{table}"
+            ).collect()
             for row in desc_result:
-                if row['col_name'] and row['col_name'].strip() == 'Location':
-                    metadata['location'] = row['data_type'].strip() if row['data_type'] else None
+                if row["col_name"] and row["col_name"].strip() == "Location":
+                    metadata["location"] = row["data_type"].strip() if row["data_type"] else None
                     break
 
             # Get metadata file location from metadata_log_entries
@@ -322,7 +342,7 @@ class SparkClient:
             metadata_log_result = spark.sql(metadata_log_sql).collect()
 
             if metadata_log_result and len(metadata_log_result) > 0:
-                metadata['metadata_location'] = metadata_log_result[0]['file']
+                metadata["metadata_location"] = metadata_log_result[0]["file"]
             else:
                 print(f"Warning: No metadata log entries found for {database}.{table}")
 
@@ -331,11 +351,13 @@ class SparkClient:
         except Exception as e:
             print(f"Error getting table metadata for {database}.{table}: {e}")
             import traceback
+
             traceback.print_exc()
             return None
 
-    def create_iceberg_table_from_metadata(self, database: str, table: str,
-                                          location: str, metadata_location: str) -> bool:
+    def create_iceberg_table_from_metadata(
+        self, database: str, table: str, location: str, metadata_location: str
+    ) -> bool:
         """
         Register an Iceberg table in the catalog pointing to existing metadata
 
@@ -370,6 +392,7 @@ class SparkClient:
         except Exception as e:
             print(f"Error registering table {database}.{table}: {e}")
             import traceback
+
             traceback.print_exc()
             return False
 
