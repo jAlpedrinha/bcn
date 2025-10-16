@@ -37,6 +37,10 @@ class Config:
     # Working directory for temporary files
     WORK_DIR = os.getenv("WORK_DIR", "/tmp/iceberg-snapshots")
 
+    # Logging configuration
+    LOG_LEVEL = os.getenv("BCN_LOG_LEVEL", "INFO")
+    LOG_FILE = os.getenv("BCN_LOG_FILE", None)
+
     @classmethod
     def get_s3_config(cls):
         """Get S3 configuration as a dictionary"""

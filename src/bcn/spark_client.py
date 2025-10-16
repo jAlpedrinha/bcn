@@ -6,6 +6,9 @@ import traceback
 from typing import Dict, List, Optional
 
 from bcn.config import Config
+from bcn.logging_config import BCNLogger
+
+logger = BCNLogger.get_logger(__name__)
 
 
 class SparkClient:
@@ -124,8 +127,7 @@ class SparkClient:
                 return []
 
         except Exception as e:
-            print(f"Error executing SQL: {e}")
-            traceback.print_exc()
+            logger.error(f"Error executing SQL: {e}", exc_info=True)
             return None
 
     def create_database(self, database: str) -> bool:
@@ -141,10 +143,10 @@ class SparkClient:
         try:
             sql = f"CREATE DATABASE IF NOT EXISTS {self.catalog_name}.{database}"
             self.execute_sql(sql)
-            print(f"✓ Created database: {database}")
+            logger.info(f"Created database: {database}")
             return True
         except Exception as e:
-            print(f"Error creating database {database}: {e}")
+            logger.error(f"Error creating database {database}: {e}")
             return False
 
     def drop_table(self, database: str, table: str) -> bool:
@@ -161,10 +163,10 @@ class SparkClient:
         try:
             sql = f"DROP TABLE IF EXISTS {self.catalog_name}.{database}.{table} PURGE"
             self.execute_sql(sql)
-            print(f"✓ Dropped table: {database}.{table}")
+            logger.info(f"Dropped table: {database}.{table}")
             return True
         except Exception as e:
-            print(f"Error dropping table {database}.{table}: {e}")
+            logger.error(f"Error dropping table {database}.{table}: {e}")
             return False
 
     def create_table(self, database: str, table: str, schema: str, location: str) -> bool:
@@ -189,10 +191,10 @@ class SparkClient:
                 LOCATION '{location}'
             """
             self.execute_sql(sql)
-            print(f"✓ Created table: {database}.{table}")
+            logger.info(f"Created table: {database}.{table}")
             return True
         except Exception as e:
-            print(f"Error creating table {database}.{table}: {e}")
+            logger.error(f"Error creating table {database}.{table}: {e}")
             return False
 
     def insert_data(self, database: str, table: str, values: List[tuple]) -> bool:
@@ -220,10 +222,10 @@ class SparkClient:
             # Write to table
             df.writeTo(f"{self.catalog_name}.{database}.{table}").append()
 
-            print(f"✓ Inserted {len(values)} rows into {database}.{table}")
+            logger.info(f"Inserted {len(values)} rows into {database}.{table}")
             return True
         except Exception as e:
-            print(f"Error inserting data into {database}.{table}: {e}")
+            logger.error(f"Error inserting data into {database}.{table}: {e}")
             return False
 
     def query_table(self, database: str, table: str) -> Optional[List[Dict]]:
@@ -241,7 +243,7 @@ class SparkClient:
             sql = f"SELECT * FROM {self.catalog_name}.{database}.{table} ORDER BY id"
             return self.execute_sql(sql)
         except Exception as e:
-            print(f"Error querying table {database}.{table}: {e}")
+            logger.error(f"Error querying table {database}.{table}: {e}")
             return None
 
     def get_row_count(self, database: str, table: str) -> Optional[int]:
@@ -262,7 +264,7 @@ class SparkClient:
                 return result[0]["count"]
             return None
         except Exception as e:
-            print(f"Error getting row count from {database}.{table}: {e}")
+            logger.error(f"Error getting row count from {database}.{table}: {e}")
             return None
 
     def list_tables(self, database: str) -> Optional[List[str]]:
@@ -282,7 +284,7 @@ class SparkClient:
                 return [row["tableName"] for row in result]
             return []
         except Exception as e:
-            print(f"Error listing tables in {database}: {e}")
+            logger.error(f"Error listing tables in {database}: {e}")
             return None
 
     def cleanup_database(self, database: str) -> bool:
@@ -300,10 +302,10 @@ class SparkClient:
             if tables:
                 for table in tables:
                     self.drop_table(database, table)
-            print(f"✓ Cleaned up database: {database}")
+            logger.info(f"Cleaned up database: {database}")
             return True
         except Exception as e:
-            print(f"Error cleaning up database {database}: {e}")
+            logger.error(f"Error cleaning up database {database}: {e}")
             return False
 
     def get_table_metadata(self, database: str, table: str) -> Optional[Dict]:
@@ -343,13 +345,12 @@ class SparkClient:
             if metadata_log_result and len(metadata_log_result) > 0:
                 metadata["metadata_location"] = metadata_log_result[0]["file"]
             else:
-                print(f"Warning: No metadata log entries found for {database}.{table}")
+                logger.warning(f"No metadata log entries found for {database}.{table}")
 
             return metadata
 
         except Exception as e:
-            print(f"Error getting table metadata for {database}.{table}: {e}")
-            traceback.print_exc()
+            logger.error(f"Error getting table metadata for {database}.{table}: {e}", exc_info=True)
             return None
 
     def create_iceberg_table_from_metadata(
@@ -383,12 +384,11 @@ class SparkClient:
             """
 
             spark.sql(sql)
-            print(f"✓ Registered Iceberg table {database}.{table}")
+            logger.info(f"Registered Iceberg table {database}.{table}")
             return True
 
         except Exception as e:
-            print(f"Error registering table {database}.{table}: {e}")
-            traceback.print_exc()
+            logger.error(f"Error registering table {database}.{table}: {e}", exc_info=True)
             return False
 
     def close(self):
