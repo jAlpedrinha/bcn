@@ -16,7 +16,6 @@ class S3Client:
     def __init__(self):
         """Initialize S3 client with configuration"""
         self.client = boto3.client("s3", **Config.get_s3_config())
-        self.s3 = boto3.resource("s3", **Config.get_s3_config())
 
     def copy_object(
         self, source_bucket: str, source_key: str, dest_bucket: str, dest_key: str

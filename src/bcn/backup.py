@@ -37,8 +37,6 @@ class IcebergBackup:
         self.s3_client = S3Client()
         self.spark_client = SparkClient(app_name=f"iceberg-backup-{backup_name}")
         self.work_dir = os.path.join(Config.WORK_DIR, backup_name)
-        self.metadata_dir = os.path.join(self.work_dir, "metadata")
-        self.data_dir = os.path.join(self.work_dir, "data")
 
     def create_backup(self) -> bool:
         """
@@ -90,7 +88,7 @@ class IcebergBackup:
 
             # Step 5: Download manifest list AND individual manifest files as raw Avro
             print("\nStep 5: Downloading manifest files...")
-            os.makedirs(self.metadata_dir, exist_ok=True)
+            os.makedirs(self.work_dir, exist_ok=True)
 
             manifest_list_paths = []
             individual_manifest_paths = []
