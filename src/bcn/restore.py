@@ -29,7 +29,6 @@ class IcebergRestore:
         target_database: str,
         target_table: str,
         target_location: str,
-        catalog_type: str = "hive",
     ):
         """
         Initialize restore process
@@ -39,13 +38,11 @@ class IcebergRestore:
             target_database: Target database name
             target_table: Target table name
             target_location: Target S3 location for the table
-            catalog_type: Type of catalog (hive or glue) - currently only hive supported
         """
         self.backup_name = backup_name
         self.target_database = target_database
         self.target_table = target_table
         self.target_location = target_location.rstrip("/")
-        self.catalog_type = catalog_type
         self.s3_client = S3Client()
         self.spark_client = SparkClient(app_name=f"iceberg-restore-{backup_name}")
         self.work_dir = os.path.join(Config.WORK_DIR, f"restore_{backup_name}")
@@ -365,12 +362,6 @@ def main():
         required=True,
         help="Target S3 location for the table (e.g., s3://bucket/warehouse/db/table)",
     )
-    parser.add_argument(
-        "--catalog-type",
-        default="hive",
-        choices=["hive", "glue"],
-        help="Catalog type (default: hive)",
-    )
 
     args = parser.parse_args()
 
@@ -380,7 +371,6 @@ def main():
         target_database=args.target_database,
         target_table=args.target_table,
         target_location=args.target_location,
-        catalog_type=args.catalog_type,
     )
 
     success = restore.restore_backup()
