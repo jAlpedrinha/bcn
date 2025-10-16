@@ -2,6 +2,7 @@
 Spark client for Iceberg table operations
 """
 
+import traceback
 from typing import Dict, List, Optional
 
 from bcn.config import Config
@@ -124,8 +125,6 @@ class SparkClient:
 
         except Exception as e:
             print(f"Error executing SQL: {e}")
-            import traceback
-
             traceback.print_exc()
             return None
 
@@ -350,8 +349,6 @@ class SparkClient:
 
         except Exception as e:
             print(f"Error getting table metadata for {database}.{table}: {e}")
-            import traceback
-
             traceback.print_exc()
             return None
 
@@ -391,8 +388,6 @@ class SparkClient:
 
         except Exception as e:
             print(f"Error registering table {database}.{table}: {e}")
-            import traceback
-
             traceback.print_exc()
             return False
 

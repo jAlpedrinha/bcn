@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import sys
+import traceback
 from typing import Dict, List
 
 from bcn.config import Config
@@ -169,8 +170,6 @@ class IcebergBackup:
 
         except Exception as e:
             print(f"Error during backup: {e}")
-            import traceback
-
             traceback.print_exc()
             return False
         # Note: Not closing spark_client here as it may be shared with other processes

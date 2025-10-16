@@ -10,6 +10,8 @@ import json
 import os
 import shutil
 import sys
+import time
+import traceback
 from typing import List
 
 from bcn.config import Config
@@ -171,8 +173,6 @@ class IcebergRestore:
                         print(f"  ✓ Uploaded manifest list: {relative_path}")
                 except Exception as e:
                     print(f"  Warning: Could not write manifest list {relative_path}: {e}")
-                    import traceback
-
                     traceback.print_exc()
 
             # Upload individual manifests
@@ -193,8 +193,6 @@ class IcebergRestore:
                         print(f"  ✓ Uploaded individual manifest: {relative_path}")
                 except Exception as e:
                     print(f"  Warning: Could not write individual manifest {relative_path}: {e}")
-                    import traceback
-
                     traceback.print_exc()
 
             # Step 7: Register table in catalog
@@ -217,8 +215,6 @@ class IcebergRestore:
 
         except Exception as e:
             print(f"Error during restore: {e}")
-            import traceback
-
             traceback.print_exc()
             return False
         # Note: Not closing spark_client here as it may be shared with other processes
@@ -286,8 +282,6 @@ class IcebergRestore:
 
         except Exception as e:
             print(f"  Error restoring manifest {relative_path}: {e}")
-            import traceback
-
             traceback.print_exc()
             return None, None
 
@@ -339,8 +333,6 @@ class IcebergRestore:
 
     def _generate_metadata_filename(self) -> str:
         """Generate a metadata filename"""
-        import time
-
         timestamp = int(time.time() * 1000)
         return f"v{timestamp}.metadata.json"
 
