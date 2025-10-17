@@ -14,16 +14,21 @@ logger = BCNLogger.get_logger(__name__)
 class SparkClient:
     """Client for interacting with Spark and Iceberg tables"""
 
-    def __init__(self, app_name: str = "bcn"):
+    def __init__(self, app_name: str = "bcn", catalog: str = None):
         """
         Initialize Spark client
 
         Args:
             app_name: Spark application name
+            catalog: Catalog name (optional). Uses: parameter -> env var -> Config.CATALOG_NAME
         """
         self.app_name = app_name
         self._spark = None
-        self.catalog_name = Config.CATALOG_NAME
+        # Catalog resolution: parameter -> environment variable -> Config default
+        if catalog:
+            self.catalog_name = catalog
+        else:
+            self.catalog_name = Config.CATALOG_NAME
 
     def get_spark_session(self):
         """Get or create Spark session with Iceberg configuration"""

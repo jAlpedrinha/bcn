@@ -26,7 +26,7 @@ logger = BCNLogger.get_logger(__name__)
 class IcebergBackup:
     """Orchestrates the backup process for an Iceberg table"""
 
-    def __init__(self, database: str, table: str, backup_name: str):
+    def __init__(self, database: str, table: str, backup_name: str, catalog: str = None):
         """
         Initialize backup process
 
@@ -34,12 +34,20 @@ class IcebergBackup:
             database: Database name
             table: Table name
             backup_name: Name for this backup
+            catalog: Catalog name (optional). Uses fallback: parameter -> env var -> default
         """
         self.database = database
         self.table = table
         self.backup_name = backup_name
+
+        # Catalog resolution: parameter -> environment variable -> default
+        if catalog:
+            self.catalog = catalog
+        else:
+            self.catalog = os.getenv("CATALOG_NAME", Config.CATALOG_NAME)
+
         self.s3_client = S3Client()
-        self.spark_client = SparkClient(app_name=f"iceberg-backup-{backup_name}")
+        self.spark_client = SparkClient(app_name=f"iceberg-backup-{backup_name}", catalog=self.catalog)
         self.work_dir = os.path.join(Config.WORK_DIR, backup_name)
 
     def create_backup(self) -> bool:
@@ -327,6 +335,11 @@ def main():
     parser.add_argument("--database", required=True, help="Database name")
     parser.add_argument("--table", required=True, help="Table name")
     parser.add_argument("--backup-name", required=True, help="Name for this backup")
+    parser.add_argument(
+        "--catalog",
+        default=None,
+        help="Catalog name (optional). Falls back to CATALOG_NAME env var, then Config default",
+    )
     parser.add_argument("--log-level", default="INFO", help="Log level (DEBUG, INFO, WARNING, ERROR)")
     parser.add_argument("--log-file", default=None, help="Optional log file path")
 
@@ -336,7 +349,7 @@ def main():
     BCNLogger.setup_logging(level=args.log_level, log_file=args.log_file)
 
     # Create backup
-    backup = IcebergBackup(args.database, args.table, args.backup_name)
+    backup = IcebergBackup(args.database, args.table, args.backup_name, catalog=args.catalog)
     success = backup.create_backup()
 
     sys.exit(0 if success else 1)

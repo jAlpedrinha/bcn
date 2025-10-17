@@ -31,6 +31,7 @@ class IcebergRestore:
         target_database: str,
         target_table: str,
         target_location: str,
+        catalog: str = None,
     ):
         """
         Initialize restore process
@@ -40,13 +41,21 @@ class IcebergRestore:
             target_database: Target database name
             target_table: Target table name
             target_location: Target S3 location for the table
+            catalog: Catalog name (optional). Uses fallback: parameter -> env var -> default
         """
         self.backup_name = backup_name
         self.target_database = target_database
         self.target_table = target_table
         self.target_location = target_location.rstrip("/")
+
+        # Catalog resolution: parameter -> environment variable -> default
+        if catalog:
+            self.catalog = catalog
+        else:
+            self.catalog = os.getenv("CATALOG_NAME", Config.CATALOG_NAME)
+
         self.s3_client = S3Client()
-        self.spark_client = SparkClient(app_name=f"iceberg-restore-{backup_name}")
+        self.spark_client = SparkClient(app_name=f"iceberg-restore-{backup_name}", catalog=self.catalog)
         self.work_dir = os.path.join(Config.WORK_DIR, f"restore_{backup_name}")
         self.backup_metadata = None
 
@@ -363,6 +372,11 @@ def main():
         help="Target S3 location for the table (e.g., s3://bucket/warehouse/db/table)",
     )
     parser.add_argument(
+        "--catalog",
+        default=None,
+        help="Catalog name (optional). Falls back to CATALOG_NAME env var, then Config default",
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         help="Log level (DEBUG, INFO, WARNING, ERROR)",
@@ -384,6 +398,7 @@ def main():
         target_database=args.target_database,
         target_table=args.target_table,
         target_location=args.target_location,
+        catalog=args.catalog,
     )
 
     success = restore.restore_backup()
