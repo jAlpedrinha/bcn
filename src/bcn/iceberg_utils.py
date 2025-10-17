@@ -4,7 +4,7 @@ Iceberg metadata utilities for parsing and modifying Iceberg table files
 
 import copy
 from io import BytesIO
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import avro.datafile
 import avro.io
@@ -126,7 +126,7 @@ class ManifestFileHandler:
     """Handles reading and writing Avro manifest files"""
 
     @staticmethod
-    def write_manifest_list(entries: List[Dict], schema) -> bytes:
+    def write_manifest_list(entries: List[Dict], schema: Any) -> bytes:
         """
         Write manifest entries to Avro format
 
@@ -148,7 +148,7 @@ class ManifestFileHandler:
         return result
 
     @staticmethod
-    def _convert_bytes_to_str(obj):
+    def _convert_bytes_to_str(obj: Any) -> Any:
         """
         Recursively convert bytes to base64 strings for JSON serialization
         """
@@ -212,7 +212,7 @@ class ManifestFileHandler:
         return abstracted
 
     @staticmethod
-    def read_manifest_file(content: bytes) -> Tuple[List[Dict], any]:
+    def read_manifest_file(content: bytes) -> Tuple[List[Dict], Any]:
         """
         Read an Avro manifest file
 
@@ -243,7 +243,7 @@ class ManifestFileHandler:
         s3_client: "S3Client",
         manifest_path: str,
         table_location: str
-    ) -> Tuple[Optional[List[Dict]], Optional[any]]:
+    ) -> Tuple[Optional[List[Dict]], Optional[Any]]:
         """
         Read manifest file from S3
 
