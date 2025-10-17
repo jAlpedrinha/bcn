@@ -8,6 +8,9 @@ import boto3
 from botocore.exceptions import ClientError
 
 from bcn.config import Config
+from bcn.logging_config import BCNLogger
+
+logger = BCNLogger.get_logger(__name__)
 
 
 class S3Client:
@@ -37,7 +40,7 @@ class S3Client:
             self.client.copy_object(CopySource=copy_source, Bucket=dest_bucket, Key=dest_key)
             return True
         except ClientError as e:
-            print(f"Error copying {source_bucket}/{source_key} to {dest_bucket}/{dest_key}: {e}")
+            logger.error(f"Error copying s3://{source_bucket}/{source_key} to s3://{dest_bucket}/{dest_key}: {e}")
             return False
 
     def read_object(self, bucket: str, key: str) -> Optional[bytes]:
@@ -55,7 +58,7 @@ class S3Client:
             response = self.client.get_object(Bucket=bucket, Key=key)
             return response["Body"].read()
         except ClientError as e:
-            print(f"Error reading {bucket}/{key}: {e}")
+            logger.error(f"Error reading s3://{bucket}/{key}: {e}")
             return None
 
     def write_object(self, bucket: str, key: str, content: bytes) -> bool:
@@ -74,7 +77,7 @@ class S3Client:
             self.client.put_object(Bucket=bucket, Key=key, Body=content)
             return True
         except ClientError as e:
-            print(f"Error writing to {bucket}/{key}: {e}")
+            logger.error(f"Error writing to s3://{bucket}/{key}: {e}")
             return False
 
     def parse_s3_uri(self, uri: str) -> tuple:

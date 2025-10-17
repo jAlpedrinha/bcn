@@ -16,14 +16,17 @@ from typing import Dict, List
 
 from bcn.config import Config
 from bcn.iceberg_utils import ManifestFileHandler, PathAbstractor
+from bcn.logging_config import BCNLogger
 from bcn.s3_client import S3Client
 from bcn.spark_client import SparkClient
+
+logger = BCNLogger.get_logger(__name__)
 
 
 class IcebergBackup:
     """Orchestrates the backup process for an Iceberg table"""
 
-    def __init__(self, database: str, table: str, backup_name: str):
+    def __init__(self, database: str, table: str, backup_name: str, catalog: str = None):
         """
         Initialize backup process
 
@@ -31,12 +34,20 @@ class IcebergBackup:
             database: Database name
             table: Table name
             backup_name: Name for this backup
+            catalog: Catalog name (optional). Uses fallback: parameter -> env var -> default
         """
         self.database = database
         self.table = table
         self.backup_name = backup_name
+
+        # Catalog resolution: parameter -> environment variable -> default
+        if catalog:
+            self.catalog = catalog
+        else:
+            self.catalog = os.getenv("CATALOG_NAME", Config.CATALOG_NAME)
+
         self.s3_client = S3Client()
-        self.spark_client = SparkClient(app_name=f"iceberg-backup-{backup_name}")
+        self.spark_client = SparkClient(app_name=f"iceberg-backup-{backup_name}", catalog=self.catalog)
         self.work_dir = os.path.join(Config.WORK_DIR, backup_name)
 
     def create_backup(self) -> bool:
@@ -47,55 +58,55 @@ class IcebergBackup:
             True if successful, False otherwise
         """
         try:
-            print(f"Starting backup of {self.database}.{self.table} as '{self.backup_name}'")
+            logger.info(f"Starting backup of {self.database}.{self.table} as '{self.backup_name}'")
 
             # Step 1: Get table metadata from Spark catalog
-            print("Step 1: Retrieving table metadata from catalog...")
+            logger.info("Step 1: Retrieving table metadata from catalog...")
             table_metadata = self.spark_client.get_table_metadata(self.database, self.table)
             if not table_metadata:
-                print(f"Error: Could not retrieve metadata for {self.database}.{self.table}")
+                logger.error(f"Could not retrieve metadata for {self.database}.{self.table}")
                 return False
 
             table_location = table_metadata["location"]
             metadata_location = table_metadata.get("metadata_location")
 
             if not metadata_location:
-                print(f"Error: No metadata_location found for {self.database}.{self.table}")
-                print("This may not be an Iceberg table.")
+                logger.error(f"No metadata_location found for {self.database}.{self.table}")
+                logger.error("This may not be an Iceberg table")
                 return False
 
-            print(f"  Table location: {table_location}")
-            print(f"  Metadata location: {metadata_location}")
+            logger.debug(f"Table location: {table_location}")
+            logger.debug(f"Metadata location: {metadata_location}")
 
             # Step 2: Download and parse main metadata file
-            print("\nStep 2: Downloading and parsing main metadata file...")
+            logger.info("Step 2: Downloading and parsing main metadata file...")
             bucket, key = self.s3_client.parse_s3_uri(metadata_location)
             metadata_content = self.s3_client.read_object(bucket, key)
             if not metadata_content:
-                print(f"Error: Could not read metadata file from {metadata_location}")
+                logger.error(f"Could not read metadata file from {metadata_location}")
                 return False
 
             metadata = json.loads(metadata_content.decode("utf-8"))
-            print(f"  Current snapshot ID: {metadata.get('current-snapshot-id')}")
+            logger.debug(f"Current snapshot ID: {metadata.get('current-snapshot-id')}")
 
             # Step 3: Abstract paths in metadata
-            print("\nStep 3: Abstracting paths in metadata...")
+            logger.info("Step 3: Abstracting paths in metadata...")
             abstracted_metadata = PathAbstractor.abstract_metadata_file(metadata, table_location)
 
             # Step 4: Process snapshots and manifests
-            print("\nStep 4: Processing snapshots and manifest files...")
+            logger.info("Step 4: Processing snapshots and manifest files...")
             manifest_files = self._collect_manifest_files(metadata, table_location)
-            print(f"  Found {len(manifest_files)} manifest files to process")
+            logger.debug(f"Found {len(manifest_files)} manifest files to process")
 
             # Step 5: Download manifest list AND individual manifest files as raw Avro
-            print("\nStep 5: Downloading manifest files...")
+            logger.info("Step 5: Downloading manifest files...")
             os.makedirs(self.work_dir, exist_ok=True)
 
             manifest_list_paths = []
             individual_manifest_paths = []
 
             for manifest_list_path in manifest_files:
-                print(f"  Downloading manifest list: {manifest_list_path}")
+                logger.debug(f"Downloading manifest list: {manifest_list_path}")
                 relative_path = PathAbstractor.abstract_path(manifest_list_path, table_location)
                 manifest_list_paths.append(relative_path)
 
@@ -119,22 +130,22 @@ class IcebergBackup:
                                 full_manifest_path = manifest_path
 
                             # Store individual manifest path
-                            print(f"    Found individual manifest: {manifest_path}")
+                            logger.debug(f"Found individual manifest: {manifest_path}")
                             manifest_relative_path = PathAbstractor.abstract_path(
                                 full_manifest_path, table_location
                             )
                             if manifest_relative_path not in individual_manifest_paths:
                                 individual_manifest_paths.append(manifest_relative_path)
                 except Exception as e:
-                    print(f"  Warning: Could not read manifest list {manifest_list_path}: {e}")
+                    logger.warning(f"Could not read manifest list {manifest_list_path}: {e}")
 
             # Step 6: Collect data file references
-            print("\nStep 6: Collecting data file references...")
+            logger.info("Step 6: Collecting data file references...")
             data_files = self._collect_data_files(manifest_files, table_location)
-            print(f"  Found {len(data_files)} data files")
+            logger.debug(f"Found {len(data_files)} data files")
 
             # Step 7: Save backup metadata
-            print("\nStep 7: Saving backup metadata...")
+            logger.info("Step 7: Saving backup metadata...")
             backup_metadata = {
                 "original_database": self.database,
                 "original_table": self.table,
@@ -152,25 +163,24 @@ class IcebergBackup:
                 json.dump(backup_metadata, f, indent=2)
 
             # Step 8: Upload to backup bucket
-            print("\nStep 8: Uploading backup to S3...")
+            logger.info("Step 8: Uploading backup to S3...")
             success = self._upload_backup_to_s3(backup_metadata, table_location)
 
             if success:
-                print(f"\n✓ Backup '{self.backup_name}' created successfully!")
-                print(f"  Location: s3://{Config.BACKUP_BUCKET}/{self.backup_name}/")
+                logger.info(f"Backup '{self.backup_name}' created successfully!")
+                logger.info(f"Location: s3://{Config.BACKUP_BUCKET}/{self.backup_name}/")
             else:
-                print("\n✗ Failed to upload backup to S3")
+                logger.error("Failed to upload backup to S3")
                 return False
 
             # Cleanup
-            print("\nCleaning up temporary files...")
+            logger.info("Cleaning up temporary files...")
             shutil.rmtree(self.work_dir, ignore_errors=True)
 
             return True
 
         except Exception as e:
-            print(f"Error during backup: {e}")
-            traceback.print_exc()
+            logger.error(f"Error during backup: {e}", exc_info=True)
             return False
         # Note: Not closing spark_client here as it may be shared with other processes
         # The caller or session fixture is responsible for closing the Spark session
@@ -235,11 +245,11 @@ class IcebergBackup:
                             if "data_file" in m_entry and "file_path" in m_entry["data_file"]:
                                 data_files.append(m_entry["data_file"]["file_path"])
                     except Exception as e:
-                        print(f"  Warning: Could not read manifest file {manifest_path}: {e}")
+                        logger.warning(f"Could not read manifest file {manifest_path}: {e}")
                         continue
 
             except Exception as e:
-                print(f"  Warning: Could not read manifest list {manifest_list_path}: {e}")
+                logger.warning(f"Could not read manifest list {manifest_list_path}: {e}")
                 continue
 
         return data_files
@@ -256,7 +266,7 @@ class IcebergBackup:
                 Config.BACKUP_BUCKET, metadata_key, metadata_content
             ):
                 return False
-            print("  ✓ Uploaded backup metadata")
+            logger.info("Uploaded backup metadata")
 
             # Upload abstracted metadata file
             iceberg_metadata_key = f"{backup_prefix}metadata.json"
@@ -267,7 +277,7 @@ class IcebergBackup:
                 Config.BACKUP_BUCKET, iceberg_metadata_key, iceberg_content
             ):
                 return False
-            print("  ✓ Uploaded Iceberg metadata")
+            logger.info("Uploaded Iceberg metadata")
 
             # Copy manifest list files as raw Avro
             manifest_lists = backup_metadata.get("manifest_lists", [])
@@ -283,10 +293,10 @@ class IcebergBackup:
                         if not self.s3_client.write_object(
                             Config.BACKUP_BUCKET, manifest_key, content
                         ):
-                            print(f"  Warning: Failed to upload manifest list {relative_path}")
+                            logger.warning(f"Failed to upload manifest list {relative_path}")
                 except Exception as e:
-                    print(f"  Warning: Could not copy manifest list {relative_path}: {e}")
-            print(f"  ✓ Uploaded {len(manifest_lists)} manifest list files")
+                    logger.warning(f"Could not copy manifest list {relative_path}: {e}")
+            logger.info(f"Uploaded {len(manifest_lists)} manifest list files")
 
             # Copy individual manifest files as raw Avro
             individual_manifests = backup_metadata.get("individual_manifests", [])
@@ -302,12 +312,12 @@ class IcebergBackup:
                         if not self.s3_client.write_object(
                             Config.BACKUP_BUCKET, manifest_key, content
                         ):
-                            print(
-                                f"  Warning: Failed to upload individual manifest {relative_path}"
+                            logger.warning(
+                                f"Failed to upload individual manifest {relative_path}"
                             )
                 except Exception as e:
-                    print(f"  Warning: Could not copy individual manifest {relative_path}: {e}")
-            print(f"  ✓ Uploaded {len(individual_manifests)} individual manifest files")
+                    logger.warning(f"Could not copy individual manifest {relative_path}: {e}")
+            logger.info(f"Uploaded {len(individual_manifests)} individual manifest files")
 
             # Note: Data files remain in original location and are not copied during backup
             # They will be copied during restore operation
@@ -315,7 +325,7 @@ class IcebergBackup:
             return True
 
         except Exception as e:
-            print(f"Error uploading to S3: {e}")
+            logger.error(f"Error uploading to S3: {e}")
             return False
 
 
@@ -325,11 +335,21 @@ def main():
     parser.add_argument("--database", required=True, help="Database name")
     parser.add_argument("--table", required=True, help="Table name")
     parser.add_argument("--backup-name", required=True, help="Name for this backup")
+    parser.add_argument(
+        "--catalog",
+        default=None,
+        help="Catalog name (optional). Falls back to CATALOG_NAME env var, then Config default",
+    )
+    parser.add_argument("--log-level", default="INFO", help="Log level (DEBUG, INFO, WARNING, ERROR)")
+    parser.add_argument("--log-file", default=None, help="Optional log file path")
 
     args = parser.parse_args()
 
+    # Setup logging with CLI arguments
+    BCNLogger.setup_logging(level=args.log_level, log_file=args.log_file)
+
     # Create backup
-    backup = IcebergBackup(args.database, args.table, args.backup_name)
+    backup = IcebergBackup(args.database, args.table, args.backup_name, catalog=args.catalog)
     success = backup.create_backup()
 
     sys.exit(0 if success else 1)

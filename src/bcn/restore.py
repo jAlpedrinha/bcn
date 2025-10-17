@@ -11,13 +11,15 @@ import os
 import shutil
 import sys
 import time
-import traceback
 from typing import List
 
 from bcn.config import Config
 from bcn.iceberg_utils import ManifestFileHandler, PathAbstractor
+from bcn.logging_config import BCNLogger
 from bcn.s3_client import S3Client
 from bcn.spark_client import SparkClient
+
+logger = BCNLogger.get_logger(__name__)
 
 
 class IcebergRestore:
@@ -29,6 +31,7 @@ class IcebergRestore:
         target_database: str,
         target_table: str,
         target_location: str,
+        catalog: str = None,
     ):
         """
         Initialize restore process
@@ -38,13 +41,21 @@ class IcebergRestore:
             target_database: Target database name
             target_table: Target table name
             target_location: Target S3 location for the table
+            catalog: Catalog name (optional). Uses fallback: parameter -> env var -> default
         """
         self.backup_name = backup_name
         self.target_database = target_database
         self.target_table = target_table
         self.target_location = target_location.rstrip("/")
+
+        # Catalog resolution: parameter -> environment variable -> default
+        if catalog:
+            self.catalog = catalog
+        else:
+            self.catalog = os.getenv("CATALOG_NAME", Config.CATALOG_NAME)
+
         self.s3_client = S3Client()
-        self.spark_client = SparkClient(app_name=f"iceberg-restore-{backup_name}")
+        self.spark_client = SparkClient(app_name=f"iceberg-restore-{backup_name}", catalog=self.catalog)
         self.work_dir = os.path.join(Config.WORK_DIR, f"restore_{backup_name}")
         self.backup_metadata = None
 
@@ -56,22 +67,22 @@ class IcebergRestore:
             True if successful, False otherwise
         """
         try:
-            print(
+            logger.info(
                 f"Starting restore of backup '{self.backup_name}' to {self.target_database}.{self.target_table}"
             )
 
             # Step 1: Download backup metadata
-            print("\nStep 1: Downloading backup metadata...")
+            logger.info("Step 1: Downloading backup metadata...")
             if not self._download_backup_metadata():
-                print("Error: Could not download backup metadata")
+                logger.error("Could not download backup metadata")
                 return False
 
             original_location = self.backup_metadata["original_location"]
-            print(f"  Original location: {original_location}")
-            print(f"  Target location: {self.target_location}")
+            logger.info(f"  Original location: {original_location}")
+            logger.info(f"  Target location: {self.target_location}")
 
             # Step 2: Restore paths in metadata
-            print("\nStep 2: Restoring paths in metadata...")
+            logger.info("Step 2: Restoring paths in metadata...")
             abstracted_metadata = self.backup_metadata["abstracted_metadata"]
             restored_metadata = PathAbstractor.abstract_metadata_file(
                 abstracted_metadata.copy(), ""
@@ -96,7 +107,7 @@ class IcebergRestore:
                         )
 
             # Step 3: Process and restore manifest files
-            print("\nStep 3: Processing manifest files...")
+            logger.info("Step 3: Processing manifest files...")
 
             # Handle both old format (manifest_files) and new format (manifest_lists + individual_manifests)
             manifest_lists = self.backup_metadata.get(
@@ -104,20 +115,20 @@ class IcebergRestore:
             )
             individual_manifests = self.backup_metadata.get("individual_manifests", [])
 
-            print(
+            logger.info(
                 f"  Found {len(manifest_lists)} manifest lists and {len(individual_manifests)} individual manifests to process"
             )
 
             restored_manifest_lists = {}
             for relative_path in manifest_lists:
-                print(f"  Restoring manifest list: {relative_path}")
+                logger.debug(f"  Restoring manifest list: {relative_path}")
                 entries, schema = self._restore_manifest_file(relative_path)
                 if entries is not None and schema is not None:
                     restored_manifest_lists[relative_path] = {"entries": entries, "schema": schema}
 
             restored_individual_manifests = {}
             for relative_path in individual_manifests:
-                print(f"  Restoring individual manifest: {relative_path}")
+                logger.debug(f"  Restoring individual manifest: {relative_path}")
                 entries, schema = self._restore_manifest_file(relative_path)
                 if entries is not None and schema is not None:
                     restored_individual_manifests[relative_path] = {
@@ -126,14 +137,14 @@ class IcebergRestore:
                     }
 
             # Step 4: Copy data files to new location
-            print("\nStep 4: Copying data files to new location...")
+            logger.info("Step 4: Copying data files to new location...")
             data_files = self.backup_metadata.get("data_files", [])
-            print(f"  Found {len(data_files)} data files to copy")
+            logger.info(f"  Found {len(data_files)} data files to copy")
 
             self._copy_data_files(data_files, original_location)
 
             # Step 5: Upload restored metadata to new location
-            print("\nStep 5: Uploading restored metadata to new location...")
+            logger.info("Step 5: Uploading restored metadata to new location...")
             metadata_filename = self._generate_metadata_filename()
             metadata_path = f"metadata/{metadata_filename}"
             new_metadata_location = f"{self.target_location}/{metadata_path}"
@@ -145,12 +156,12 @@ class IcebergRestore:
 
             metadata_content = json.dumps(restored_metadata, indent=2).encode("utf-8")
             if not self.s3_client.write_object(bucket, metadata_key, metadata_content):
-                print("Error: Could not upload metadata file")
+                logger.error("Could not upload metadata file")
                 return False
-            print(f"  ✓ Uploaded metadata to {new_metadata_location}")
+            logger.info(f"  Uploaded metadata to {new_metadata_location}")
 
             # Upload manifest files as Avro
-            print("\nStep 6: Uploading manifest files...")
+            logger.info("Step 6: Uploading manifest files...")
 
             # Upload manifest lists
             for relative_path, manifest_data in restored_manifest_lists.items():
@@ -165,12 +176,12 @@ class IcebergRestore:
                     manifest_content = ManifestFileHandler.write_manifest_list(entries, schema)
 
                     if not self.s3_client.write_object(bucket, key, manifest_content):
-                        print(f"  Warning: Could not upload manifest list {relative_path}")
+                        logger.warning(f"  Could not upload manifest list {relative_path}")
                     else:
-                        print(f"  ✓ Uploaded manifest list: {relative_path}")
+                        logger.debug(f"  Uploaded manifest list: {relative_path}")
                 except Exception as e:
-                    print(f"  Warning: Could not write manifest list {relative_path}: {e}")
-                    traceback.print_exc()
+                    logger.warning(f"  Could not write manifest list {relative_path}: {e}")
+                    logger.error("Exception details:", exc_info=True)
 
             # Upload individual manifests
             for relative_path, manifest_data in restored_individual_manifests.items():
@@ -185,34 +196,33 @@ class IcebergRestore:
                     manifest_content = ManifestFileHandler.write_manifest_list(entries, schema)
 
                     if not self.s3_client.write_object(bucket, key, manifest_content):
-                        print(f"  Warning: Could not upload individual manifest {relative_path}")
+                        logger.warning(f"  Could not upload individual manifest {relative_path}")
                     else:
-                        print(f"  ✓ Uploaded individual manifest: {relative_path}")
+                        logger.debug(f"  Uploaded individual manifest: {relative_path}")
                 except Exception as e:
-                    print(f"  Warning: Could not write individual manifest {relative_path}: {e}")
-                    traceback.print_exc()
+                    logger.warning(f"  Could not write individual manifest {relative_path}: {e}")
+                    logger.error("Exception details:", exc_info=True)
 
             # Step 7: Register table in catalog
-            print("\nStep 7: Registering table in catalog...")
+            logger.info("Step 7: Registering table in catalog...")
             if not self._register_table(new_metadata_location):
-                print("Error: Could not register table in catalog")
+                logger.error("Could not register table in catalog")
                 return False
 
-            print(
-                f"\n✓ Successfully restored backup '{self.backup_name}' to {self.target_database}.{self.target_table}"
+            logger.info(
+                f"Successfully restored backup '{self.backup_name}' to {self.target_database}.{self.target_table}"
             )
-            print(f"  Table location: {self.target_location}")
-            print(f"  Metadata location: {new_metadata_location}")
+            logger.info(f"  Table location: {self.target_location}")
+            logger.info(f"  Metadata location: {new_metadata_location}")
 
             # Cleanup
-            print("\nCleaning up temporary files...")
+            logger.info("Cleaning up temporary files...")
             shutil.rmtree(self.work_dir, ignore_errors=True)
 
             return True
 
         except Exception as e:
-            print(f"Error during restore: {e}")
-            traceback.print_exc()
+            logger.error(f"Error during restore: {e}", exc_info=True)
             return False
         # Note: Not closing spark_client here as it may be shared with other processes
         # The caller or session fixture is responsible for closing the Spark session
@@ -230,7 +240,7 @@ class IcebergRestore:
             return True
 
         except Exception as e:
-            print(f"Error downloading backup metadata: {e}")
+            logger.error(f"Error downloading backup metadata: {e}", exc_info=True)
             return False
 
     def _restore_manifest_file(self, relative_path: str) -> tuple:
@@ -241,7 +251,7 @@ class IcebergRestore:
             content = self.s3_client.read_object(Config.BACKUP_BUCKET, backup_key)
 
             if not content:
-                print(f"  Warning: Could not read manifest {relative_path}")
+                logger.warning(f"  Could not read manifest {relative_path}")
                 return None, None
 
             # Read the Avro file to get entries and schema
@@ -278,8 +288,7 @@ class IcebergRestore:
             return restored_entries, schema
 
         except Exception as e:
-            print(f"  Error restoring manifest {relative_path}: {e}")
-            traceback.print_exc()
+            logger.error(f"  Error restoring manifest {relative_path}: {e}", exc_info=True)
             return None, None
 
     def _copy_data_files(self, data_files: List[str], original_location: str) -> None:
@@ -310,7 +319,7 @@ class IcebergRestore:
                 if self.s3_client.copy_object(orig_bucket, source_key, target_bucket, dest_key):
                     copied += 1
                     if copied % 10 == 0:  # Progress update every 10 files
-                        print(f"  Copied {copied}/{len(data_files)} files...")
+                        logger.debug(f"  Copied {copied}/{len(data_files)} files...")
                 else:
                     failed_files.append(relative_path)
 
@@ -320,7 +329,7 @@ class IcebergRestore:
                     error_msg += f" ... and {len(failed_files) - 5} more"
                 raise RuntimeError(error_msg)
 
-            print(f"  ✓ Copied {copied} data files")
+            logger.info(f"  Copied {copied} data files")
 
         except RuntimeError:
             # Re-raise RuntimeError from failed copies
@@ -347,7 +356,7 @@ class IcebergRestore:
             return success
 
         except Exception as e:
-            print(f"Error registering table in catalog: {e}")
+            logger.error(f"Error registering table in catalog: {e}", exc_info=True)
             return False
 
 
@@ -362,8 +371,26 @@ def main():
         required=True,
         help="Target S3 location for the table (e.g., s3://bucket/warehouse/db/table)",
     )
+    parser.add_argument(
+        "--catalog",
+        default=None,
+        help="Catalog name (optional). Falls back to CATALOG_NAME env var, then Config default",
+    )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        help="Log level (DEBUG, INFO, WARNING, ERROR)",
+    )
+    parser.add_argument(
+        "--log-file",
+        default=None,
+        help="Optional log file path",
+    )
 
     args = parser.parse_args()
+
+    # Setup logging
+    BCNLogger.setup_logging(level=args.log_level, log_file=args.log_file)
 
     # Create restore
     restore = IcebergRestore(
@@ -371,6 +398,7 @@ def main():
         target_database=args.target_database,
         target_table=args.target_table,
         target_location=args.target_location,
+        catalog=args.catalog,
     )
 
     success = restore.restore_backup()

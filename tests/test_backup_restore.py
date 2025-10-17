@@ -55,7 +55,6 @@ class TestBackupRestore:
             target_database=database,
             target_table=target_table,
             target_location=target_location,
-            catalog_type="hive",
         )
         restore_success = restore.restore_backup()
 
