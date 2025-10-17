@@ -12,7 +12,6 @@ import os
 import re
 import shutil
 import sys
-import traceback
 from typing import Dict, List
 
 from bcn.config import Config

@@ -2,7 +2,6 @@
 Spark client for Iceberg table operations
 """
 
-import traceback
 from typing import Dict, List, Optional
 
 from bcn.config import Config
