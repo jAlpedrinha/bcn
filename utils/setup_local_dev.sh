@@ -111,7 +111,13 @@ export SPARK_HOME="\$(python -c 'import pyspark; import os; print(os.path.dirnam
 export PYSPARK_SUBMIT_ARGS="--jars $JAR_PATH --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions pyspark-shell"
 
 # Python path
-export PYTHONPATH="\${PYTHONPATH}:${PROJECT_ROOT}/src"
+export PYTHONPATH="\${PYTHONPATH}:${PROJECT_ROOT}/src
+
+# Logging
+export LOG_LEVEL=INFO
+#export LOG_FILE=myfile.log
+
+"
 
 echo "✓ Iceberg Snapshots local environment loaded"
 EOF

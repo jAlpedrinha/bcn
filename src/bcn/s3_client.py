@@ -9,6 +9,7 @@ from botocore.exceptions import ClientError
 
 from bcn.config import Config
 from bcn.logging_config import BCNLogger
+from bcn.retry import retry_on_error
 
 logger = BCNLogger.get_logger(__name__)
 
@@ -43,6 +44,7 @@ class S3Client:
             logger.error(f"Error copying s3://{source_bucket}/{source_key} to s3://{dest_bucket}/{dest_key}: {e}")
             return False
 
+    @retry_on_error(max_attempts=3, exceptions=(ClientError,))
     def read_object(self, bucket: str, key: str) -> Optional[bytes]:
         """
         Read object content from S3
@@ -58,8 +60,17 @@ class S3Client:
             response = self.client.get_object(Bucket=bucket, Key=key)
             return response["Body"].read()
         except ClientError as e:
-            logger.error(f"Error reading s3://{bucket}/{key}: {e}")
-            return None
+            error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+            logger.error(
+                f"S3 read failed: s3://{bucket}/{key}",
+                extra={
+                    "error_code": error_code,
+                    "bucket": bucket,
+                    "key": key,
+                    "operation": "read_object"
+                }
+            )
+            raise
 
     def write_object(self, bucket: str, key: str, content: bytes) -> bool:
         """

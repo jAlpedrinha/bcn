@@ -9,9 +9,9 @@ to a backup location with abstracted paths.
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
-import traceback
 from typing import Dict, List
 
 from bcn.config import Config
@@ -35,10 +35,27 @@ class IcebergBackup:
             table: Table name
             backup_name: Name for this backup
             catalog: Catalog name (optional). Uses fallback: parameter -> env var -> default
+
+        Raises:
+            ValueError: If database, table, or backup_name are empty or contain invalid characters
         """
-        self.database = database
-        self.table = table
-        self.backup_name = backup_name
+        # Validate inputs
+        if not database or not database.strip():
+            raise ValueError("Database name cannot be empty")
+        if not table or not table.strip():
+            raise ValueError("Table name cannot be empty")
+        if not backup_name or not backup_name.strip():
+            raise ValueError("Backup name cannot be empty")
+
+        # Check for invalid characters in backup_name
+        if not re.match(r'^[a-zA-Z0-9_-]+$', backup_name):
+            raise ValueError(
+                "Backup name must contain only letters, numbers, hyphens, and underscores"
+            )
+
+        self.database = database.strip()
+        self.table = table.strip()
+        self.backup_name = backup_name.strip()
 
         # Catalog resolution: parameter -> environment variable -> default
         if catalog:
@@ -186,7 +203,19 @@ class IcebergBackup:
         # The caller or session fixture is responsible for closing the Spark session
 
     def _collect_manifest_files(self, metadata: Dict, table_location: str) -> List[str]:
-        """Collect all manifest file paths from metadata"""
+        """
+        Collect all manifest file paths from Iceberg metadata.
+
+        Extracts manifest-list paths from all snapshots in the metadata and converts
+        relative paths to full S3 URIs for consistent processing.
+
+        Args:
+            metadata: Parsed Iceberg metadata JSON containing snapshots
+            table_location: Base S3 location of the table for resolving relative paths
+
+        Returns:
+            List of full S3 URIs pointing to manifest list files (snap-*.avro)
+        """
         manifest_files = []
 
         for snapshot in metadata.get("snapshots", []):
@@ -203,7 +232,19 @@ class IcebergBackup:
         return manifest_files
 
     def _collect_data_files(self, manifest_list_files: List[str], table_location: str) -> List[str]:
-        """Collect all data file paths from manifest list files"""
+        """
+        Collect all data file paths from manifest list and manifest files.
+
+        Traverses the manifest hierarchy: manifest lists -> individual manifests -> data files.
+        Gracefully handles errors in individual files without failing the entire operation.
+
+        Args:
+            manifest_list_files: List of full S3 URIs to manifest list files (snap-*.avro)
+            table_location: Base S3 location of the table for relative path resolution
+
+        Returns:
+            List of S3 paths to data files referenced in the manifests
+        """
         data_files = []
 
         # manifest_list_files are actually manifest list files (snap-*.avro)
@@ -211,13 +252,11 @@ class IcebergBackup:
         for manifest_list_path in manifest_list_files:
             try:
                 # Read the manifest list file
-                bucket, key = self.s3_client.parse_s3_uri(manifest_list_path)
-                content = self.s3_client.read_object(bucket, key)
-                if not content:
+                manifest_list_entries, _ = ManifestFileHandler.read_manifest_from_s3(
+                    self.s3_client, manifest_list_path, table_location
+                )
+                if not manifest_list_entries:
                     continue
-
-                # Get manifest file paths from the manifest list
-                manifest_list_entries, _ = ManifestFileHandler.read_manifest_file(content)
 
                 # Now read each manifest file to get data files
                 for entry in manifest_list_entries:
@@ -226,21 +265,15 @@ class IcebergBackup:
                     if not manifest_path:
                         continue
 
-                    # Convert relative manifest path to full S3 URI
-                    if not manifest_path.startswith("s3://") and not manifest_path.startswith(
-                        "s3a://"
-                    ):
-                        manifest_path = f"{table_location}/{manifest_path}"
-
                     try:
                         # Read the actual manifest file
-                        m_bucket, m_key = self.s3_client.parse_s3_uri(manifest_path)
-                        m_content = self.s3_client.read_object(m_bucket, m_key)
-                        if not m_content:
+                        manifest_entries, _ = ManifestFileHandler.read_manifest_from_s3(
+                            self.s3_client, manifest_path, table_location
+                        )
+                        if not manifest_entries:
                             continue
 
                         # Get data files from the manifest
-                        manifest_entries, _ = ManifestFileHandler.read_manifest_file(m_content)
                         for m_entry in manifest_entries:
                             if "data_file" in m_entry and "file_path" in m_entry["data_file"]:
                                 data_files.append(m_entry["data_file"]["file_path"])
@@ -255,7 +288,25 @@ class IcebergBackup:
         return data_files
 
     def _upload_backup_to_s3(self, backup_metadata: Dict, table_location: str) -> bool:
-        """Upload backup files to S3 backup bucket"""
+        """
+        Upload all backup files to the S3 backup bucket.
+
+        Uploads metadata files (JSON) and manifest files (Avro) for the backup.
+        Data files are not copied during backup; they remain in the original location
+        and are copied during restore if needed.
+
+        Args:
+            backup_metadata: Dictionary containing backup metadata including manifest lists,
+                           individual manifests, and abstracted metadata
+            table_location: Original table location for constructing full S3 paths
+
+        Returns:
+            True if all uploads succeed, False if any critical upload fails
+
+        Note:
+            Individual file upload failures are logged as warnings but do not fail the
+            entire backup operation unless metadata uploads fail.
+        """
         try:
             backup_prefix = f"{self.backup_name}/"
 
