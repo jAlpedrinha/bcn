@@ -41,6 +41,10 @@ class Config:
     LOG_LEVEL = os.getenv("BCN_LOG_LEVEL", "INFO")
     LOG_FILE = os.getenv("BCN_LOG_FILE", None)
 
+    # Iceberg directory structure
+    METADATA_DIR = "metadata"
+    DATA_DIR = "data"
+
     @classmethod
     def get_s3_config(cls):
         """Get S3 configuration as a dictionary"""
