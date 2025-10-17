@@ -8,6 +8,7 @@ Restores an Iceberg table from a backup to a new table location.
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -42,11 +43,30 @@ class IcebergRestore:
             target_table: Target table name
             target_location: Target S3 location for the table
             catalog: Catalog name (optional). Uses fallback: parameter -> env var -> default
+
+        Raises:
+            ValueError: If any required parameter is empty or invalid
         """
-        self.backup_name = backup_name
-        self.target_database = target_database
-        self.target_table = target_table
-        self.target_location = target_location.rstrip("/")
+        # Validate inputs
+        if not backup_name or not backup_name.strip():
+            raise ValueError("Backup name cannot be empty")
+        if not target_database or not target_database.strip():
+            raise ValueError("Target database name cannot be empty")
+        if not target_table or not target_table.strip():
+            raise ValueError("Target table name cannot be empty")
+        if not target_location or not target_location.strip():
+            raise ValueError("Target location cannot be empty")
+
+        # Check for invalid characters in backup_name and table names
+        if not re.match(r'^[a-zA-Z0-9_-]+$', backup_name):
+            raise ValueError(
+                "Backup name must contain only letters, numbers, hyphens, and underscores"
+            )
+
+        self.backup_name = backup_name.strip()
+        self.target_database = target_database.strip()
+        self.target_table = target_table.strip()
+        self.target_location = target_location.rstrip("/").strip()
 
         # Catalog resolution: parameter -> environment variable -> default
         if catalog:

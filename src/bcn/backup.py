@@ -9,6 +9,7 @@ to a backup location with abstracted paths.
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 import traceback
@@ -35,10 +36,27 @@ class IcebergBackup:
             table: Table name
             backup_name: Name for this backup
             catalog: Catalog name (optional). Uses fallback: parameter -> env var -> default
+
+        Raises:
+            ValueError: If database, table, or backup_name are empty or contain invalid characters
         """
-        self.database = database
-        self.table = table
-        self.backup_name = backup_name
+        # Validate inputs
+        if not database or not database.strip():
+            raise ValueError("Database name cannot be empty")
+        if not table or not table.strip():
+            raise ValueError("Table name cannot be empty")
+        if not backup_name or not backup_name.strip():
+            raise ValueError("Backup name cannot be empty")
+
+        # Check for invalid characters in backup_name
+        if not re.match(r'^[a-zA-Z0-9_-]+$', backup_name):
+            raise ValueError(
+                "Backup name must contain only letters, numbers, hyphens, and underscores"
+            )
+
+        self.database = database.strip()
+        self.table = table.strip()
+        self.backup_name = backup_name.strip()
 
         # Catalog resolution: parameter -> environment variable -> default
         if catalog:
