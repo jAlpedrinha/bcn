@@ -248,7 +248,18 @@ class IcebergRestore:
         # The caller or session fixture is responsible for closing the Spark session
 
     def _download_backup_metadata(self) -> bool:
-        """Download and parse backup metadata from S3"""
+        """
+        Download and parse backup metadata from the backup bucket.
+
+        Retrieves the backup_metadata.json file that contains information about the backup
+        including original location, manifest lists, individual manifests, and abstracted metadata.
+
+        Returns:
+            True if metadata is successfully downloaded and parsed, False otherwise
+
+        Side Effects:
+            Sets self.backup_metadata with the parsed metadata dictionary
+        """
         try:
             backup_key = f"{self.backup_name}/backup_metadata.json"
             content = self.s3_client.read_object(Config.BACKUP_BUCKET, backup_key)
@@ -264,7 +275,21 @@ class IcebergRestore:
             return False
 
     def _restore_manifest_file(self, relative_path: str) -> tuple:
-        """Download and restore paths in a manifest file (raw Avro)"""
+        """
+        Download and restore paths in a manifest file.
+
+        Downloads a manifest file (in Avro format) from the backup bucket, parses it,
+        abstracts paths from the original location, and restores them to the new location.
+        Handles both manifest list files and individual manifest files with different path structures.
+
+        Args:
+            relative_path: Relative path to the manifest file within the backup (from backup_metadata.json)
+
+        Returns:
+            Tuple of (entries, schema) where:
+            - entries: List of manifest entries with restored paths, or None if error
+            - schema: Avro schema of the manifest file, or None if error
+        """
         try:
             # Download raw Avro from backup
             backup_key = f"{self.backup_name}/{relative_path}"
@@ -313,14 +338,18 @@ class IcebergRestore:
 
     def _copy_data_files(self, data_files: List[str], original_location: str) -> None:
         """
-        Copy data files from original location to new location
+        Copy data files from original location to new target location.
+
+        Copies all data files referenced in the manifest files from the original table location
+        to the new table location in S3. Supports cross-bucket and cross-prefix copying.
+        Logs progress every 10 files copied.
 
         Args:
-            data_files: List of relative data file paths
-            original_location: Original table location
+            data_files: List of relative data file paths (from manifest files)
+            original_location: Original S3 location of the table
 
         Raises:
-            RuntimeError: If any data files fail to copy
+            RuntimeError: If any data files fail to copy, includes list of up to 5 failed files
         """
         try:
             # Parse original location
@@ -358,12 +387,29 @@ class IcebergRestore:
             raise RuntimeError(f"Error copying data files: {e}") from e
 
     def _generate_metadata_filename(self) -> str:
-        """Generate a metadata filename"""
+        """
+        Generate a unique metadata filename using current timestamp.
+
+        Returns:
+            Metadata filename in format 'v{timestamp}.metadata.json' where timestamp
+            is milliseconds since epoch
+        """
         timestamp = int(time.time() * 1000)
         return f"v{timestamp}.metadata.json"
 
     def _register_table(self, metadata_location: str) -> bool:
-        """Register the restored table in the catalog using Spark"""
+        """
+        Register the restored table in the Iceberg catalog.
+
+        Uses Spark's register_table system procedure to create a new table entry that points
+        to the restored metadata file. This makes the table accessible in the catalog.
+
+        Args:
+            metadata_location: Full S3 URI to the restored metadata.json file
+
+        Returns:
+            True if table registration succeeds, False otherwise
+        """
         try:
             # Use Spark to create the table pointing to the restored metadata
             success = self.spark_client.create_iceberg_table_from_metadata(

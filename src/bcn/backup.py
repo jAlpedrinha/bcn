@@ -203,7 +203,19 @@ class IcebergBackup:
         # The caller or session fixture is responsible for closing the Spark session
 
     def _collect_manifest_files(self, metadata: Dict, table_location: str) -> List[str]:
-        """Collect all manifest file paths from metadata"""
+        """
+        Collect all manifest file paths from Iceberg metadata.
+
+        Extracts manifest-list paths from all snapshots in the metadata and converts
+        relative paths to full S3 URIs for consistent processing.
+
+        Args:
+            metadata: Parsed Iceberg metadata JSON containing snapshots
+            table_location: Base S3 location of the table for resolving relative paths
+
+        Returns:
+            List of full S3 URIs pointing to manifest list files (snap-*.avro)
+        """
         manifest_files = []
 
         for snapshot in metadata.get("snapshots", []):
@@ -220,7 +232,19 @@ class IcebergBackup:
         return manifest_files
 
     def _collect_data_files(self, manifest_list_files: List[str], table_location: str) -> List[str]:
-        """Collect all data file paths from manifest list files"""
+        """
+        Collect all data file paths from manifest list and manifest files.
+
+        Traverses the manifest hierarchy: manifest lists -> individual manifests -> data files.
+        Gracefully handles errors in individual files without failing the entire operation.
+
+        Args:
+            manifest_list_files: List of full S3 URIs to manifest list files (snap-*.avro)
+            table_location: Base S3 location of the table for relative path resolution
+
+        Returns:
+            List of S3 paths to data files referenced in the manifests
+        """
         data_files = []
 
         # manifest_list_files are actually manifest list files (snap-*.avro)
@@ -264,7 +288,25 @@ class IcebergBackup:
         return data_files
 
     def _upload_backup_to_s3(self, backup_metadata: Dict, table_location: str) -> bool:
-        """Upload backup files to S3 backup bucket"""
+        """
+        Upload all backup files to the S3 backup bucket.
+
+        Uploads metadata files (JSON) and manifest files (Avro) for the backup.
+        Data files are not copied during backup; they remain in the original location
+        and are copied during restore if needed.
+
+        Args:
+            backup_metadata: Dictionary containing backup metadata including manifest lists,
+                           individual manifests, and abstracted metadata
+            table_location: Original table location for constructing full S3 paths
+
+        Returns:
+            True if all uploads succeed, False if any critical upload fails
+
+        Note:
+            Individual file upload failures are logged as warnings but do not fail the
+            entire backup operation unless metadata uploads fail.
+        """
         try:
             backup_prefix = f"{self.backup_name}/"
 
