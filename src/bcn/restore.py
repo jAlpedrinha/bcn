@@ -166,7 +166,7 @@ class IcebergRestore:
             # Step 5: Upload restored metadata to new location
             logger.info("Step 5: Uploading restored metadata to new location...")
             metadata_filename = self._generate_metadata_filename()
-            metadata_path = f"metadata/{metadata_filename}"
+            metadata_path = f"{Config.METADATA_DIR}/{metadata_filename}"
             new_metadata_location = f"{self.target_location}/{metadata_path}"
 
             # Upload metadata file
