@@ -4,11 +4,14 @@ Iceberg metadata utilities for parsing and modifying Iceberg table files
 
 import copy
 from io import BytesIO
-from typing import Dict, List, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import avro.datafile
 import avro.io
 import avro.schema
+
+if TYPE_CHECKING:
+    from bcn.s3_client import S3Client
 
 
 class PathAbstractor:
@@ -53,6 +56,31 @@ class PathAbstractor:
         new_table_location = new_table_location.rstrip("/")
         relative_path = relative_path.lstrip("/")
         return f"{new_table_location}/{relative_path}"
+
+    @staticmethod
+    def resolve_path(path: str, base_location: str) -> str:
+        """
+        Resolve a potentially relative path to a full S3 URI
+
+        Args:
+            path: Path that may be relative or absolute
+            base_location: Base location for resolving relative paths
+
+        Returns:
+            Full S3 URI
+        """
+        # Normalize s3a:// to s3://
+        if path.startswith("s3a://"):
+            return "s3://" + path[6:]
+
+        # Already absolute
+        if path.startswith("s3://"):
+            return path
+
+        # Relative path - combine with base
+        base_location = base_location.rstrip("/")
+        path = path.lstrip("/")
+        return f"{base_location}/{path}"
 
     @staticmethod
     def abstract_metadata_file(metadata_content: Dict, table_location: str) -> Dict:
@@ -209,6 +237,45 @@ class ManifestFileHandler:
                 entries.append(record)
             reader.close()
         return entries, schema
+
+    @staticmethod
+    def read_manifest_from_s3(
+        s3_client: "S3Client",
+        manifest_path: str,
+        table_location: str
+    ) -> Tuple[Optional[List[Dict]], Optional[any]]:
+        """
+        Read manifest file from S3
+
+        Args:
+            s3_client: S3 client instance
+            manifest_path: Full or relative manifest path
+            table_location: Table location for resolving relative paths
+
+        Returns:
+            Tuple of (entries, schema) or (None, None) on error
+        """
+        from bcn.logging_config import BCNLogger
+
+        logger = BCNLogger.get_logger(__name__)
+
+        # Convert relative paths to full S3 URIs
+        if not manifest_path.startswith("s3://") and not manifest_path.startswith("s3a://"):
+            full_path = PathAbstractor.resolve_path(manifest_path, table_location)
+        else:
+            full_path = manifest_path
+
+        try:
+            bucket, key = s3_client.parse_s3_uri(full_path)
+            content = s3_client.read_object(bucket, key)
+            if not content:
+                logger.warning(f"Empty content for manifest: {manifest_path}")
+                return None, None
+
+            return ManifestFileHandler.read_manifest_file(content)
+        except Exception as e:
+            logger.error(f"Error reading manifest {manifest_path}: {e}")
+            return None, None
 
     @staticmethod
     def abstract_manifest_data_paths(entries: List[Dict], table_location: str) -> List[Dict]:

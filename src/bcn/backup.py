@@ -211,13 +211,11 @@ class IcebergBackup:
         for manifest_list_path in manifest_list_files:
             try:
                 # Read the manifest list file
-                bucket, key = self.s3_client.parse_s3_uri(manifest_list_path)
-                content = self.s3_client.read_object(bucket, key)
-                if not content:
+                manifest_list_entries, _ = ManifestFileHandler.read_manifest_from_s3(
+                    self.s3_client, manifest_list_path, table_location
+                )
+                if not manifest_list_entries:
                     continue
-
-                # Get manifest file paths from the manifest list
-                manifest_list_entries, _ = ManifestFileHandler.read_manifest_file(content)
 
                 # Now read each manifest file to get data files
                 for entry in manifest_list_entries:
@@ -226,21 +224,15 @@ class IcebergBackup:
                     if not manifest_path:
                         continue
 
-                    # Convert relative manifest path to full S3 URI
-                    if not manifest_path.startswith("s3://") and not manifest_path.startswith(
-                        "s3a://"
-                    ):
-                        manifest_path = f"{table_location}/{manifest_path}"
-
                     try:
                         # Read the actual manifest file
-                        m_bucket, m_key = self.s3_client.parse_s3_uri(manifest_path)
-                        m_content = self.s3_client.read_object(m_bucket, m_key)
-                        if not m_content:
+                        manifest_entries, _ = ManifestFileHandler.read_manifest_from_s3(
+                            self.s3_client, manifest_path, table_location
+                        )
+                        if not manifest_entries:
                             continue
 
                         # Get data files from the manifest
-                        manifest_entries, _ = ManifestFileHandler.read_manifest_file(m_content)
                         for m_entry in manifest_entries:
                             if "data_file" in m_entry and "file_path" in m_entry["data_file"]:
                                 data_files.append(m_entry["data_file"]["file_path"])
