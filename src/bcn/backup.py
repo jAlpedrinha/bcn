@@ -12,7 +12,9 @@ import os
 import re
 import shutil
 import sys
-from typing import Dict, List
+import time
+import uuid
+from typing import Dict, List, Optional
 
 from bcn.config import Config
 from bcn.iceberg_utils import ManifestFileHandler, PathAbstractor
@@ -21,6 +23,152 @@ from bcn.s3_client import S3Client
 from bcn.spark_client import SparkClient
 
 logger = BCNLogger.get_logger(__name__)
+
+
+class BackupRepository:
+    """Manages PIT (Point-in-Time) chain structure and repository state.
+
+    Handles PIT indexing, manifest storage, and chain traversal for incremental
+    backup support. Each PIT is a backup snapshot with optional parent reference.
+    """
+
+    def __init__(self, backup_name: str, s3_client: S3Client):
+        """
+        Initialize repository manager.
+
+        Args:
+            backup_name: Name of the backup
+            s3_client: S3 client for storage operations
+        """
+        self.backup_name = backup_name
+        self.s3_client = s3_client
+        self.backup_bucket = Config.BACKUP_BUCKET
+
+    def get_or_create_index(self) -> Dict:
+        """Get or create repository index (list of PITs).
+
+        Returns:
+            Dictionary with structure:
+            {
+                "backup_name": str,
+                "pits": [
+                    {
+                        "pit_id": str,
+                        "created_at": int (unix timestamp),
+                        "parent_pit_id": Optional[str]
+                    },
+                    ...
+                ]
+            }
+        """
+        try:
+            index_key = f"{self.backup_name}/index.json"
+            content = self.s3_client.read_object(self.backup_bucket, index_key)
+
+            if content:
+                return json.loads(content.decode("utf-8"))
+
+            # Create new index
+            return {
+                "backup_name": self.backup_name,
+                "pits": []
+            }
+        except Exception as e:
+            logger.debug(f"Could not read repository index: {e}")
+            return {
+                "backup_name": self.backup_name,
+                "pits": []
+            }
+
+    def get_last_pit(self) -> Optional[str]:
+        """Get latest PIT ID in chain.
+
+        Returns:
+            PIT ID (string) if PITs exist, None otherwise
+        """
+        index = self.get_or_create_index()
+        pits = index.get("pits", [])
+
+        if not pits:
+            return None
+
+        # PITs are ordered by creation, last one is most recent
+        return pits[-1]["pit_id"]
+
+    def save_pit(self, pit_id: str, manifest: Dict) -> bool:
+        """Store PIT manifest.
+
+        Args:
+            pit_id: Unique PIT identifier
+            manifest: PIT manifest dictionary
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            manifest_key = f"{self.backup_name}/pits/{pit_id}/manifest.json"
+            manifest_content = json.dumps(manifest, indent=2).encode("utf-8")
+
+            return self.s3_client.write_object(
+                self.backup_bucket, manifest_key, manifest_content
+            )
+        except Exception as e:
+            logger.error(f"Error saving PIT manifest: {e}")
+            return False
+
+    def get_pit_manifest(self, pit_id: str) -> Optional[Dict]:
+        """Load PIT manifest.
+
+        Args:
+            pit_id: PIT identifier
+
+        Returns:
+            Manifest dictionary if found, None otherwise
+        """
+        try:
+            manifest_key = f"{self.backup_name}/pits/{pit_id}/manifest.json"
+            content = self.s3_client.read_object(self.backup_bucket, manifest_key)
+
+            if not content:
+                return None
+
+            return json.loads(content.decode("utf-8"))
+        except Exception as e:
+            logger.debug(f"Could not read PIT manifest: {e}")
+            return None
+
+    def update_index(self, pit_id: str, parent_pit_id: Optional[str] = None) -> bool:
+        """Add PIT to index.
+
+        Args:
+            pit_id: New PIT identifier
+            parent_pit_id: Parent PIT ID (None for first backup)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            index = self.get_or_create_index()
+
+            # Add new PIT entry
+            pit_entry = {
+                "pit_id": pit_id,
+                "created_at": int(time.time() * 1000),  # milliseconds since epoch
+                "parent_pit_id": parent_pit_id
+            }
+
+            index["pits"].append(pit_entry)
+
+            # Save updated index
+            index_key = f"{self.backup_name}/index.json"
+            index_content = json.dumps(index, indent=2).encode("utf-8")
+
+            return self.s3_client.write_object(
+                self.backup_bucket, index_key, index_content
+            )
+        except Exception as e:
+            logger.error(f"Error updating repository index: {e}")
+            return False
 
 
 class IcebergBackup:
@@ -65,14 +213,19 @@ class IcebergBackup:
 
         self.s3_client = S3Client()
         self.spark_client = SparkClient(app_name=f"iceberg-backup-{backup_name}", catalog=self.catalog)
+        self.repository = BackupRepository(backup_name, self.s3_client)
         self.work_dir = os.path.join(Config.WORK_DIR, backup_name)
 
-    def create_backup(self) -> bool:
+    def create_backup(self) -> Optional[str]:
         """
-        Create a backup of the Iceberg table
+        Create a backup of the Iceberg table using unified algorithm.
+
+        Works for first backup (creates initial PIT with all files as delta)
+        and subsequent backups (creates new PIT with only changed files + parent ref).
+        Same algorithm - just different input state.
 
         Returns:
-            True if successful, False otherwise
+            PIT ID (string) if successful, None otherwise
         """
         try:
             logger.info(f"Starting backup of {self.database}.{self.table} as '{self.backup_name}'")
@@ -82,7 +235,7 @@ class IcebergBackup:
             table_metadata = self.spark_client.get_table_metadata(self.database, self.table)
             if not table_metadata:
                 logger.error(f"Could not retrieve metadata for {self.database}.{self.table}")
-                return False
+                return None
 
             table_location = table_metadata["location"]
             metadata_location = table_metadata.get("metadata_location")
@@ -90,7 +243,7 @@ class IcebergBackup:
             if not metadata_location:
                 logger.error(f"No metadata_location found for {self.database}.{self.table}")
                 logger.error("This may not be an Iceberg table")
-                return False
+                return None
 
             logger.debug(f"Table location: {table_location}")
             logger.debug(f"Metadata location: {metadata_location}")
@@ -101,7 +254,7 @@ class IcebergBackup:
             metadata_content = self.s3_client.read_object(bucket, key)
             if not metadata_content:
                 logger.error(f"Could not read metadata file from {metadata_location}")
-                return False
+                return None
 
             metadata = json.loads(metadata_content.decode("utf-8"))
             logger.debug(f"Current snapshot ID: {metadata.get('current-snapshot-id')}")
@@ -161,46 +314,134 @@ class IcebergBackup:
             data_files = self._collect_data_files(manifest_files, table_location)
             logger.debug(f"Found {len(data_files)} data files")
 
-            # Step 7: Save backup metadata
-            logger.info("Step 7: Saving backup metadata...")
-            backup_metadata = {
-                "original_database": self.database,
-                "original_table": self.table,
-                "original_location": table_location,
-                "backup_name": self.backup_name,
-                "abstracted_metadata": abstracted_metadata,
-                "manifest_lists": manifest_list_paths,
-                "individual_manifests": individual_manifest_paths,
-                "data_files": [PathAbstractor.abstract_path(f, table_location) for f in data_files],
-            }
+            # Step 7: Check if previous backup exists (unified algorithm decision point)
+            logger.info("Step 7: Checking for previous backups...")
+            previous_pit_id = self.repository.get_last_pit()
 
-            # Save to local work directory
-            backup_metadata_path = os.path.join(self.work_dir, "backup_metadata.json")
-            with open(backup_metadata_path, "w") as f:
-                json.dump(backup_metadata, f, indent=2)
-
-            # Step 8: Upload to backup bucket
-            logger.info("Step 8: Uploading backup to S3...")
-            success = self._upload_backup_to_s3(backup_metadata, table_location)
-
-            if success:
-                logger.info(f"Backup '{self.backup_name}' created successfully!")
-                logger.info(f"Location: s3://{Config.BACKUP_BUCKET}/{self.backup_name}/")
+            if previous_pit_id is None:
+                logger.info("  This is the first backup for this backup name")
+                parent_pit_id = None
             else:
+                logger.info(f"  Found previous PIT: {previous_pit_id}")
+                parent_pit_id = previous_pit_id
+
+            # Step 8: Generate new PIT ID
+            pit_id = self._generate_pit_id()
+            logger.info(f"  Generated new PIT ID: {pit_id}")
+
+            # Step 9: Create PIT manifest
+            logger.info("Step 9: Creating PIT manifest...")
+            pit_manifest = self._create_pit_manifest(
+                pit_id=pit_id,
+                parent_pit_id=parent_pit_id,
+                database=self.database,
+                table=self.table,
+                table_location=table_location,
+                abstracted_metadata=abstracted_metadata,
+                manifest_lists=manifest_list_paths,
+                individual_manifests=individual_manifest_paths,
+                data_files=[PathAbstractor.abstract_path(f, table_location) for f in data_files],
+            )
+
+            # Step 10: Save PIT manifest
+            if not self.repository.save_pit(pit_id, pit_manifest):
+                logger.error("Failed to save PIT manifest")
+                return None
+
+            # Step 11: Update repository index
+            if not self.repository.update_index(pit_id, parent_pit_id):
+                logger.error("Failed to update repository index")
+                return None
+
+            # Step 12: Upload manifest files to S3
+            logger.info("Step 12: Uploading manifest files to S3...")
+            success = self._upload_backup_to_s3(pit_manifest, table_location)
+
+            if not success:
                 logger.error("Failed to upload backup to S3")
-                return False
+                return None
+
+            logger.info(f"Successfully created backup PIT: {pit_id}")
+            logger.info(f"  Backup name: {self.backup_name}")
+            logger.info(f"  Parent PIT: {parent_pit_id or 'None (first backup)'}")
+            logger.info(f"  Location: s3://{Config.BACKUP_BUCKET}/{self.backup_name}/pits/{pit_id}/")
 
             # Cleanup
             logger.info("Cleaning up temporary files...")
             shutil.rmtree(self.work_dir, ignore_errors=True)
 
-            return True
+            return pit_id
 
         except Exception as e:
             logger.error(f"Error during backup: {e}", exc_info=True)
-            return False
+            return None
         # Note: Not closing spark_client here as it may be shared with other processes
         # The caller or session fixture is responsible for closing the Spark session
+
+    def _generate_pit_id(self) -> str:
+        """Generate a unique PIT ID using timestamp and UUID.
+
+        Returns:
+            PIT ID in format: pit-{timestamp}-{uuid}
+        """
+        timestamp = int(time.time() * 1000)  # milliseconds since epoch
+        unique_id = str(uuid.uuid4())[:8]  # First 8 chars of UUID
+        return f"pit-{timestamp}-{unique_id}"
+
+    def _create_pit_manifest(
+        self,
+        pit_id: str,
+        parent_pit_id: Optional[str],
+        database: str,
+        table: str,
+        table_location: str,
+        abstracted_metadata: Dict,
+        manifest_lists: List[str],
+        individual_manifests: List[str],
+        data_files: List[str],
+    ) -> Dict:
+        """Create a PIT manifest with parent reference and file information.
+
+        Args:
+            pit_id: Unique PIT identifier
+            parent_pit_id: Parent PIT ID (None for first backup)
+            database: Source database name
+            table: Source table name
+            table_location: Original table location
+            abstracted_metadata: Abstracted Iceberg metadata
+            manifest_lists: List of manifest list paths
+            individual_manifests: List of individual manifest paths
+            data_files: List of data file paths
+
+        Returns:
+            PIT manifest dictionary with structure:
+            {
+                "pit_id": str,
+                "parent_pit_id": Optional[str],
+                "created_at": int,
+                "original_database": str,
+                "original_table": str,
+                "original_location": str,
+                "backup_name": str,
+                "abstracted_metadata": Dict,
+                "manifest_lists": [str],
+                "individual_manifests": [str],
+                "data_files": [str]
+            }
+        """
+        return {
+            "pit_id": pit_id,
+            "parent_pit_id": parent_pit_id,
+            "created_at": int(time.time() * 1000),  # milliseconds since epoch
+            "original_database": database,
+            "original_table": table,
+            "original_location": table_location,
+            "backup_name": self.backup_name,
+            "abstracted_metadata": abstracted_metadata,
+            "manifest_lists": manifest_lists,
+            "individual_manifests": individual_manifests,
+            "data_files": data_files,
+        }
 
     def _collect_manifest_files(self, metadata: Dict, table_location: str) -> List[str]:
         """
@@ -401,9 +642,14 @@ def main():
 
     # Create backup
     backup = IcebergBackup(args.database, args.table, args.backup_name, catalog=args.catalog)
-    success = backup.create_backup()
+    pit_id = backup.create_backup()
 
-    sys.exit(0 if success else 1)
+    if pit_id:
+        print(f"✓ Backup created successfully: PIT {pit_id}")
+        sys.exit(0)
+    else:
+        print("✗ Backup failed")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

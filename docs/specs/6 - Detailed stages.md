@@ -1,15 +1,5 @@
 # Careful, Staged Refactoring Plan: Unified Backup/Restore Architecture
 
-## Problem Statement
-
-Current architecture has duplication that creates maintenance burden:
-- `backup.py` - handles full backups
-- `incremental_backup.py` - handles incremental backups (separate implementation)
-- `restore.py` - handles full restores
-- `incremental_restore.py` - handles incremental restores (separate implementation)
-
-This creates code fragmentation when the fundamental algorithm is the same.
-
 ## Core Architectural Insight
 
 There is **ONE backup algorithm** and **ONE restore algorithm**. The only difference is whether previous state exists:
