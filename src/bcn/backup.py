@@ -249,17 +249,18 @@ class IcebergBackup:
 
     def _collect_data_files(self, manifest_list_files: List[str], table_location: str) -> List[str]:
         """
-        Collect all data file paths from manifest list and manifest files.
+        Collect all active data file paths from manifest list and manifest files.
 
         Traverses the manifest hierarchy: manifest lists -> individual manifests -> data files.
-        Gracefully handles errors in individual files without failing the entire operation.
+        Only collects ACTIVE files (status 0=EXISTING or 1=ADDED), skipping DELETED files (status 2).
+        This ensures we only back up data that is part of the current snapshot.
 
         Args:
             manifest_list_files: List of full S3 URIs to manifest list files (snap-*.avro)
             table_location: Base S3 location of the table for relative path resolution
 
         Returns:
-            List of S3 paths to data files referenced in the manifests
+            List of S3 paths to active data files referenced in the manifests
         """
         data_files = []
 
@@ -290,7 +291,15 @@ class IcebergBackup:
                             continue
 
                         # Get data files from the manifest
+                        # Only include ACTIVE files (status 0=EXISTING or 1=ADDED)
+                        # Skip DELETED files (status 2)
                         for m_entry in manifest_entries:
+                            # Check entry status: 0=EXISTING, 1=ADDED, 2=DELETED
+                            status = m_entry.get("status", 1)  # Default to ADDED if missing
+                            if status == 2:
+                                # Skip deleted entries
+                                continue
+
                             if "data_file" in m_entry and "file_path" in m_entry["data_file"]:
                                 data_files.append(m_entry["data_file"]["file_path"])
                     except Exception as e:

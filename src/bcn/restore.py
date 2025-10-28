@@ -284,15 +284,16 @@ class IcebergRestore:
         Download and restore paths in a manifest file.
 
         Downloads a manifest file (in Avro format) from the backup bucket, parses it,
-        abstracts paths from the original location, and restores them to the new location.
-        Handles both manifest list files and individual manifest files with different path structures.
+        filters out deleted entries (status=2), abstracts paths from the original location,
+        and restores them to the new location. Handles both manifest list files and
+        individual manifest files with different path structures.
 
         Args:
             relative_path: Relative path to the manifest file within the backup (from backup_metadata.json)
 
         Returns:
             Tuple of (entries, schema) where:
-            - entries: List of manifest entries with restored paths, or None if error
+            - entries: List of active manifest entries with restored paths, or None if error
             - schema: Avro schema of the manifest file, or None if error
         """
         try:
@@ -327,10 +328,13 @@ class IcebergRestore:
                     abstracted_entries, self.target_location
                 )
             elif entries and "data_file" in entries[0]:
-                # This is an individual manifest - abstract then restore data_file paths
+                # This is an individual manifest - filter, abstract, then restore data_file paths
+                # Filter out deleted entries (status=2)
+                active_entries = [e for e in entries if e.get("status", 1) != 2]
+
                 # Step 1: Abstract the paths from original location
                 abstracted_entries = ManifestFileHandler.abstract_manifest_data_paths_avro(
-                    entries, original_location
+                    active_entries, original_location
                 )
                 # Step 2: Restore the paths to new location
                 restored_entries = ManifestFileHandler.restore_manifest_data_paths(
