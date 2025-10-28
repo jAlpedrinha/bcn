@@ -118,7 +118,8 @@ class IcebergBackup:
 
             # Step 4: Process snapshots and manifests
             logger.info("Step 4: Processing snapshots and manifest files...")
-            manifest_files = self._collect_manifest_files(metadata, table_location)
+            # Use abstracted_metadata which contains only the current snapshot
+            manifest_files = self._collect_manifest_files(abstracted_metadata, table_location)
             logger.debug(f"Found {len(manifest_files)} manifest files to process")
 
             # Step 5: Download manifest list AND individual manifest files as raw Avro
@@ -215,13 +216,16 @@ class IcebergBackup:
 
     def _collect_manifest_files(self, metadata: Dict, table_location: str) -> List[str]:
         """
-        Collect all manifest file paths from Iceberg metadata.
+        Collect manifest file paths from current snapshot only.
 
-        Extracts manifest-list paths from all snapshots in the metadata and converts
-        relative paths to full S3 URIs for consistent processing.
+        For backups, we only need the current snapshot's manifest files, not the entire
+        snapshot history. This method extracts the manifest-list path from snapshots
+        (which should only contain the current snapshot after abstraction) and converts
+        relative paths to full S3 URIs.
 
         Args:
-            metadata: Parsed Iceberg metadata JSON containing snapshots
+            metadata: Parsed Iceberg metadata JSON containing snapshots (should be abstracted
+                     metadata with only current snapshot)
             table_location: Base S3 location of the table for resolving relative paths
 
         Returns:
@@ -229,6 +233,7 @@ class IcebergBackup:
         """
         manifest_files = []
 
+        # After abstraction, metadata should only contain current snapshot
         for snapshot in metadata.get("snapshots", []):
             if "manifest-list" in snapshot:
                 manifest_list_path = snapshot["manifest-list"]

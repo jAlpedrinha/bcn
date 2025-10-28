@@ -85,14 +85,18 @@ class PathAbstractor:
     @staticmethod
     def abstract_metadata_file(metadata_content: Dict, table_location: str) -> Dict:
         """
-        Abstract paths in main metadata file
+        Abstract paths in main metadata file and keep only current snapshot.
+
+        For a restored table, we treat it as a new table with only the current snapshot,
+        not the entire snapshot history. This ensures the restored table is clean and
+        doesn't reference snapshots or metadata files that weren't migrated.
 
         Args:
             metadata_content: Parsed metadata JSON content
             table_location: Table location to abstract
 
         Returns:
-            Modified metadata with abstracted paths
+            Modified metadata with abstracted paths and only current snapshot
         """
         abstracted = copy.deepcopy(metadata_content)
 
@@ -100,24 +104,38 @@ class PathAbstractor:
         if "location" in abstracted:
             abstracted["location"] = ""  # Will be set during restore
 
-        # Abstract snapshot metadata locations
-        if "snapshots" in abstracted:
+        # Keep only the current snapshot, discard snapshot history
+        current_snapshot_id = abstracted.get("current-snapshot-id")
+        if current_snapshot_id and "snapshots" in abstracted:
+            # Find the current snapshot
+            current_snapshot = None
             for snapshot in abstracted["snapshots"]:
-                if "manifest-list" in snapshot:
-                    snapshot["manifest-list"] = PathAbstractor.abstract_path(
-                        snapshot["manifest-list"], table_location
-                    )
+                if snapshot.get("snapshot-id") == current_snapshot_id:
+                    current_snapshot = snapshot
+                    break
 
-        # Clear snapshot log for MVP (as per spec, we assume no history)
+            if current_snapshot:
+                # Abstract the manifest-list path in current snapshot
+                if "manifest-list" in current_snapshot:
+                    current_snapshot["manifest-list"] = PathAbstractor.abstract_path(
+                        current_snapshot["manifest-list"], table_location
+                    )
+                # Keep only the current snapshot
+                abstracted["snapshots"] = [current_snapshot]
+            else:
+                # If we can't find current snapshot, keep all and abstract paths
+                # This shouldn't happen but is a safety fallback
+                for snapshot in abstracted["snapshots"]:
+                    if "manifest-list" in snapshot:
+                        snapshot["manifest-list"] = PathAbstractor.abstract_path(
+                            snapshot["manifest-list"], table_location
+                        )
+
+        # Clear snapshot log (no history for restored table)
         abstracted["snapshot-log"] = []
 
-        # Abstract metadata log entries
-        if "metadata-log" in abstracted:
-            for entry in abstracted["metadata-log"]:
-                if "metadata-file" in entry:
-                    entry["metadata-file"] = PathAbstractor.abstract_path(
-                        entry["metadata-file"], table_location
-                    )
+        # Clear metadata log (no history for restored table)
+        abstracted["metadata-log"] = []
 
         return abstracted
 
