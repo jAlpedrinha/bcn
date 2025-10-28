@@ -94,6 +94,12 @@ class SparkClient:
                 f"spark.sql.catalog.{catalog_name}.s3.access-key-id", Config.S3_ACCESS_KEY
             ).config(f"spark.sql.catalog.{catalog_name}.s3.secret-access-key", Config.S3_SECRET_KEY)
 
+            # S3 session token (for AWS STS/AssumeRole)
+            if Config.S3_SESSION_TOKEN and Config.S3_SESSION_TOKEN.strip():
+                builder = builder.config(
+                    f"spark.sql.catalog.{catalog_name}.s3.session-token", Config.S3_SESSION_TOKEN
+                )
+
             # S3 endpoint and path-style access (only for MinIO/custom S3)
             if Config.S3_ENDPOINT and Config.S3_ENDPOINT.strip():
                 builder = builder.config(
@@ -111,6 +117,12 @@ class SparkClient:
                 .config("spark.hadoop.fs.s3a.secret.key", Config.S3_SECRET_KEY)
                 .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
             )
+
+            # Hadoop S3A session token (for AWS STS/AssumeRole)
+            if Config.S3_SESSION_TOKEN and Config.S3_SESSION_TOKEN.strip():
+                builder = builder.config(
+                    "spark.hadoop.fs.s3a.session.token", Config.S3_SESSION_TOKEN
+                )
 
             # Hadoop S3A endpoint and path-style (only for MinIO/custom S3)
             if Config.S3_ENDPOINT and Config.S3_ENDPOINT.strip():

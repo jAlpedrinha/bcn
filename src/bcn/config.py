@@ -14,6 +14,7 @@ class Config:
     S3_ENDPOINT = os.getenv("S3_ENDPOINT", "http://localhost:9000")
     S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY", "admin")
     S3_SECRET_KEY = os.getenv("S3_SECRET_KEY", "password")
+    S3_SESSION_TOKEN = os.getenv("S3_SESSION_TOKEN", None)  # For AWS STS/AssumeRole
     S3_REGION = os.getenv("S3_REGION", "us-east-1")
 
     # S3 Path Style Access
@@ -53,6 +54,10 @@ class Config:
             "aws_secret_access_key": cls.S3_SECRET_KEY,
             "region_name": cls.S3_REGION,
         }
+
+        # Add session token if present (for AWS STS/AssumeRole)
+        if cls.S3_SESSION_TOKEN and cls.S3_SESSION_TOKEN.strip():
+            config["aws_session_token"] = cls.S3_SESSION_TOKEN
 
         # Only add endpoint_url if it's set (for MinIO)
         # AWS S3 should not have an endpoint_url
