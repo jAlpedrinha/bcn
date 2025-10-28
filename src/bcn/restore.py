@@ -118,13 +118,7 @@ class IcebergRestore:
                         snapshot["manifest-list"], self.target_location
                     )
 
-            # Restore metadata log paths
-            if "metadata-log" in restored_metadata:
-                for entry in restored_metadata["metadata-log"]:
-                    if "metadata-file" in entry:
-                        entry["metadata-file"] = PathAbstractor.restore_path(
-                            entry["metadata-file"], self.target_location
-                        )
+            # Note: metadata-log is cleared during backup to avoid timestamp parsing issues
 
             # Step 3: Process and restore manifest files
             logger.info("Step 3: Processing manifest files...")
