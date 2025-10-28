@@ -292,15 +292,16 @@ class IcebergBackup:
 
                         # Get data files from the manifest
                         # Only include ACTIVE files (status 0=EXISTING or 1=ADDED)
-                        # Skip DELETED files (status 2)
                         for m_entry in manifest_entries:
                             # Check entry status: 0=EXISTING, 1=ADDED, 2=DELETED
                             status = m_entry.get("status", 1)  # Default to ADDED if missing
                             if status == 2:
                                 # Skip deleted entries
+                                logger.info(f"Skiping manifest entry {m_entry}")
                                 continue
 
                             if "data_file" in m_entry and "file_path" in m_entry["data_file"]:
+                                logger.info(f"Adding data file {m_entry}")
                                 data_files.append(m_entry["data_file"]["file_path"])
                     except Exception as e:
                         logger.warning(f"Could not read manifest file {manifest_path}: {e}")
