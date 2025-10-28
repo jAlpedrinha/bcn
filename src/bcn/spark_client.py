@@ -44,7 +44,6 @@ class SparkClient:
                 builder.config(
                     f"spark.sql.catalog.{catalog_name}", "org.apache.iceberg.spark.SparkCatalog"
                 )
-                .config(f"spark.sql.catalog.{catalog_name}.type", catalog_type)
                 .config(
                     f"spark.sql.catalog.{catalog_name}.warehouse",
                     f"s3a://{Config.WAREHOUSE_BUCKET}/",
@@ -63,13 +62,17 @@ class SparkClient:
             # Catalog-specific configuration
             if catalog_type == "hive":
                 # Hive metastore configuration
+                builder = builder.config(f"spark.sql.catalog.{catalog_name}.type", catalog_type)
                 builder = builder.config(
                     f"spark.sql.catalog.{catalog_name}.uri", Config.HIVE_METASTORE_URI
                 )
             elif catalog_type == "glue":
-                # AWS Glue configuration - uses AWS SDK defaults
+                # AWS Glue configuration - uses Iceberg's GlueCatalog implementation
                 # Glue catalog uses AWS credentials from environment or IAM roles
-                pass
+                builder = builder.config(
+                    f"spark.sql.catalog.{catalog_name}.catalog-impl",
+                    "org.apache.iceberg.aws.glue.GlueCatalog",
+                )
 
             # S3 configuration for Iceberg catalog
             builder = builder.config(
