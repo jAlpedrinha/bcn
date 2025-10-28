@@ -358,7 +358,7 @@ class IcebergBackup:
                 return False
             logger.info("Uploaded Iceberg metadata")
 
-            # Copy manifest list files as raw Avro
+            # Copy manifest list files (manifest lists don't have deleted entries, copy as-is)
             manifest_lists = backup_metadata.get("manifest_lists", [])
             for relative_path in manifest_lists:
                 full_path = f"{table_location}/{relative_path}"
@@ -367,7 +367,7 @@ class IcebergBackup:
                     bucket, key = self.s3_client.parse_s3_uri(full_path)
                     content = self.s3_client.read_object(bucket, key)
                     if content:
-                        # Upload raw Avro to backup
+                        # Upload raw Avro to backup (manifest lists don't need filtering)
                         manifest_key = f"{backup_prefix}{relative_path}"
                         if not self.s3_client.write_object(
                             Config.BACKUP_BUCKET, manifest_key, content
@@ -377,19 +377,31 @@ class IcebergBackup:
                     logger.warning(f"Could not copy manifest list {relative_path}: {e}")
             logger.info(f"Uploaded {len(manifest_lists)} manifest list files")
 
-            # Copy individual manifest files as raw Avro
+            # Copy individual manifest files, filtering out deleted entries
             individual_manifests = backup_metadata.get("individual_manifests", [])
             for relative_path in individual_manifests:
                 full_path = f"{table_location}/{relative_path}"
                 try:
-                    # Download raw Avro from source
+                    # Download and parse Avro from source
                     bucket, key = self.s3_client.parse_s3_uri(full_path)
                     content = self.s3_client.read_object(bucket, key)
                     if content:
-                        # Upload raw Avro to backup
+                        # Read entries and schema
+                        entries, schema = ManifestFileHandler.read_manifest_file(content)
+
+                        # Filter out deleted entries (status=2)
+                        # Only keep EXISTING (0) and ADDED (1) entries
+                        active_entries = [e for e in entries if e.get("status", 1) != 2]
+
+                        # Rewrite Avro with only active entries
+                        filtered_content = ManifestFileHandler.write_manifest_list(
+                            active_entries, schema
+                        )
+
+                        # Upload filtered Avro to backup
                         manifest_key = f"{backup_prefix}{relative_path}"
                         if not self.s3_client.write_object(
-                            Config.BACKUP_BUCKET, manifest_key, content
+                            Config.BACKUP_BUCKET, manifest_key, filtered_content
                         ):
                             logger.warning(
                                 f"Failed to upload individual manifest {relative_path}"
