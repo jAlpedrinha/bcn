@@ -185,7 +185,12 @@ class IcebergBackup:
 
             if success:
                 logger.info(f"Backup '{self.backup_name}' created successfully!")
-                logger.info(f"Location: s3://{Config.BACKUP_BUCKET}/{self.backup_name}/")
+                # Include prefix in location if present
+                if Config.BACKUP_PREFIX:
+                    backup_location = f"s3://{Config.BACKUP_BUCKET}/{Config.BACKUP_PREFIX}/{self.backup_name}/"
+                else:
+                    backup_location = f"s3://{Config.BACKUP_BUCKET}/{self.backup_name}/"
+                logger.info(f"Location: {backup_location}")
             else:
                 logger.error("Failed to upload backup to S3")
                 return False
@@ -308,7 +313,11 @@ class IcebergBackup:
             entire backup operation unless metadata uploads fail.
         """
         try:
-            backup_prefix = f"{self.backup_name}/"
+            # Construct backup prefix including any configured prefix from BACKUP_BUCKET
+            if Config.BACKUP_PREFIX:
+                backup_prefix = f"{Config.BACKUP_PREFIX}/{self.backup_name}/"
+            else:
+                backup_prefix = f"{self.backup_name}/"
 
             # Upload backup metadata
             metadata_key = f"{backup_prefix}backup_metadata.json"

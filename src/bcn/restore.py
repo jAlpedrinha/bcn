@@ -261,7 +261,11 @@ class IcebergRestore:
             Sets self.backup_metadata with the parsed metadata dictionary
         """
         try:
-            backup_key = f"{self.backup_name}/backup_metadata.json"
+            # Construct backup key including any configured prefix from BACKUP_BUCKET
+            if Config.BACKUP_PREFIX:
+                backup_key = f"{Config.BACKUP_PREFIX}/{self.backup_name}/backup_metadata.json"
+            else:
+                backup_key = f"{self.backup_name}/backup_metadata.json"
             content = self.s3_client.read_object(Config.BACKUP_BUCKET, backup_key)
 
             if not content:
@@ -292,7 +296,11 @@ class IcebergRestore:
         """
         try:
             # Download raw Avro from backup
-            backup_key = f"{self.backup_name}/{relative_path}"
+            # Construct backup key including any configured prefix from BACKUP_BUCKET
+            if Config.BACKUP_PREFIX:
+                backup_key = f"{Config.BACKUP_PREFIX}/{self.backup_name}/{relative_path}"
+            else:
+                backup_key = f"{self.backup_name}/{relative_path}"
             content = self.s3_client.read_object(Config.BACKUP_BUCKET, backup_key)
 
             if not content:
