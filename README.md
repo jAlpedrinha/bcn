@@ -4,30 +4,32 @@ A backup and restore solution for Apache Iceberg tables, similar to Amazon Redsh
 
 ## Features
 
-- **Backup Iceberg Tables**: Create portable backups with abstracted paths
+- **Backup Iceberg Tables**: Create complete, independent backups with abstracted paths
 - **Restore to New Locations**: Restore backups to different table locations and names
 - **Hive Metastore Support**: Works with Hive Metastore catalog
+- **AWS Glue Support**: Works with AWS Glue catalog and S3
 - **Path Abstraction**: Automatically handles path transformations for portability
 - **Metadata Preservation**: Maintains Iceberg metadata and snapshot information
-- **Data File Management**: Copies data files to new locations during restore
+- **Complete Data Backup**: Copies all data files during backup for true independence
+- **STS/AssumeRole Support**: Works with AWS temporary credentials
 
 ## Architecture
 
 The system consists of two main operations:
 
 ### Backup Process
-1. Retrieves table metadata from Hive Metastore
+1. Retrieves table metadata from catalog (Hive or Glue)
 2. Downloads Iceberg metadata and manifest files
 3. Abstracts paths (removes table location prefix)
 4. Uploads abstracted metadata to backup bucket
-5. Stores data file references (actual data remains in place)
+5. **Copies all data files to backup bucket** (creates independent backup)
 
 ### Restore Process
-1. Downloads backup metadata
+1. Downloads backup metadata from backup bucket
 2. Restores paths with new table location
-3. Copies data files from original to new location
+3. Copies data files from backup to new location
 4. Uploads restored metadata to new location
-5. Registers new table in Hive Metastore
+5. Registers new table in catalog (Hive or Glue)
 
 ## Prerequisites
 

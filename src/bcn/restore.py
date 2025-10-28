@@ -346,34 +346,42 @@ class IcebergRestore:
 
     def _copy_data_files(self, data_files: List[str], original_location: str) -> None:
         """
-        Copy data files from original location to new target location.
+        Copy data files from backup location to new target location.
 
-        Copies all data files referenced in the manifest files from the original table location
-        to the new table location in S3. Supports cross-bucket and cross-prefix copying.
-        Logs progress every 10 files copied.
+        Copies all data files from the backup bucket to the new table location in S3.
+        The data files were copied to the backup during the backup operation, making
+        the backup independent of the original table.
 
         Args:
             data_files: List of relative data file paths (from manifest files)
-            original_location: Original S3 location of the table
+            original_location: Original S3 location of the table (unused, kept for compatibility)
 
         Raises:
             RuntimeError: If any data files fail to copy, includes list of up to 5 failed files
         """
         try:
-            # Parse original location
-            orig_bucket, orig_prefix = self.s3_client.parse_s3_uri(original_location)
+            # Data files are now in the backup location, not the original location
+            # Construct source prefix in backup bucket
+            if Config.BACKUP_PREFIX:
+                backup_source_prefix = f"{Config.BACKUP_PREFIX}/{self.backup_name}"
+            else:
+                backup_source_prefix = self.backup_name
+
             target_bucket, target_prefix = self.s3_client.parse_s3_uri(self.target_location)
 
             copied = 0
             failed_files = []
 
             for relative_path in data_files:
-                # Build source and destination paths
-                source_key = f"{orig_prefix}/{relative_path}".lstrip("/")
+                # Build source path from backup location
+                source_key = f"{backup_source_prefix}/{relative_path}"
+                # Build destination path at target location
                 dest_key = f"{target_prefix}/{relative_path}".lstrip("/")
 
-                # Copy the file
-                if self.s3_client.copy_object(orig_bucket, source_key, target_bucket, dest_key):
+                # Copy the file from backup to target
+                if self.s3_client.copy_object(
+                    Config.BACKUP_BUCKET, source_key, target_bucket, dest_key
+                ):
                     copied += 1
                     if copied % 10 == 0:  # Progress update every 10 files
                         logger.debug(f"  Copied {copied}/{len(data_files)} files...")
@@ -386,7 +394,7 @@ class IcebergRestore:
                     error_msg += f" ... and {len(failed_files) - 5} more"
                 raise RuntimeError(error_msg)
 
-            logger.info(f"  Copied {copied} data files")
+            logger.info(f"  Copied {copied} data files from backup")
 
         except RuntimeError:
             # Re-raise RuntimeError from failed copies
