@@ -12,6 +12,7 @@ import re
 import shutil
 import sys
 import time
+import uuid
 from typing import List
 
 from bcn.config import Config
@@ -404,16 +405,19 @@ class IcebergRestore:
 
     def _generate_metadata_filename(self) -> str:
         """
-        Generate metadata filename using Iceberg version format.
+        Generate metadata filename using Iceberg format.
 
-        Iceberg uses sequential version numbers (v1, v2, v3...) for metadata files,
-        not timestamps. For a restored table, we start with v1 as it's effectively
-        a new table.
+        Iceberg metadata files use the format: {version}-{uuid}.metadata.json
+        Example: 00001-bcebdc51-8f37-461d-a300-f6ab0759be07.metadata.json
+
+        For a restored table, we start with version 00001 and generate a new UUID.
 
         Returns:
-            Metadata filename in format 'v1.metadata.json'
+            Metadata filename in format '{version}-{uuid}.metadata.json'
         """
-        return "v1.metadata.json"
+        version = "00001"  # Start with version 1 for restored table
+        file_uuid = str(uuid.uuid4())
+        return f"{version}-{file_uuid}.metadata.json"
 
     def _register_table(self, metadata_location: str) -> bool:
         """
