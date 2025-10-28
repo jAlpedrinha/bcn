@@ -111,10 +111,13 @@ class PathAbstractor:
         # Clear snapshot log for MVP (as per spec, we assume no history)
         abstracted["snapshot-log"] = []
 
-        # Clear metadata log to avoid timestamp parsing issues
-        # Metadata log entries contain timestamp-ms fields that may exceed Integer.MAX_VALUE
-        # For a restored table, we don't need the metadata history from the original table
-        abstracted["metadata-log"] = []
+        # Abstract metadata log entries
+        if "metadata-log" in abstracted:
+            for entry in abstracted["metadata-log"]:
+                if "metadata-file" in entry:
+                    entry["metadata-file"] = PathAbstractor.abstract_path(
+                        entry["metadata-file"], table_location
+                    )
 
         return abstracted
 
