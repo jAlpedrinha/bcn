@@ -404,14 +404,16 @@ class IcebergRestore:
 
     def _generate_metadata_filename(self) -> str:
         """
-        Generate a unique metadata filename using current timestamp.
+        Generate metadata filename using Iceberg version format.
+
+        Iceberg uses sequential version numbers (v1, v2, v3...) for metadata files,
+        not timestamps. For a restored table, we start with v1 as it's effectively
+        a new table.
 
         Returns:
-            Metadata filename in format 'v{timestamp}.metadata.json' where timestamp
-            is milliseconds since epoch
+            Metadata filename in format 'v1.metadata.json'
         """
-        timestamp = int(time.time() * 1000)
-        return f"v{timestamp}.metadata.json"
+        return "v1.metadata.json"
 
     def _register_table(self, metadata_location: str) -> bool:
         """
