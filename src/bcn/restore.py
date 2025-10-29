@@ -105,9 +105,10 @@ class IcebergRestore:
             # Step 2: Restore paths in metadata
             logger.info("Step 2: Restoring paths in metadata...")
             abstracted_metadata = self.backup_metadata["abstracted_metadata"]
-            restored_metadata = PathAbstractor.abstract_metadata_file(
-                abstracted_metadata.copy(), ""
-            )
+
+            # The backup already contains abstracted metadata with the complete snapshot ancestry
+            # We just need to copy it and restore paths, not abstract it again
+            restored_metadata = abstracted_metadata.copy()
 
             # Set new location
             restored_metadata["location"] = self.target_location
