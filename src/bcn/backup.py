@@ -2,14 +2,8 @@
 """
 Iceberg Table Backup Script
 
-Creates a complete, independent backup of an Iceberg table by copying:
-- Metadata files (Iceberg metadata JSON)
-- Manifest files (manifest lists and individual manifests in Avro format)
-- Data files (Parquet/ORC/Avro data files)
-
-All paths are abstracted (table location prefixes removed) for portability.
-The backup is stored in a backup bucket and is fully independent of the
-original table, allowing safe deletion of the source table after backup.
+Creates a backup of an Iceberg table by copying metadata and data files
+to a backup location with abstracted paths.
 """
 
 import argparse
@@ -118,8 +112,7 @@ class IcebergBackup:
 
             # Step 4: Process snapshots and manifests
             logger.info("Step 4: Processing snapshots and manifest files...")
-            # Use abstracted_metadata which contains only the current snapshot
-            manifest_files = self._collect_manifest_files(abstracted_metadata, table_location)
+            manifest_files = self._collect_manifest_files(metadata, table_location)
             logger.debug(f"Found {len(manifest_files)} manifest files to process")
 
             # Step 5: Download manifest list AND individual manifest files as raw Avro
@@ -192,12 +185,7 @@ class IcebergBackup:
 
             if success:
                 logger.info(f"Backup '{self.backup_name}' created successfully!")
-                # Include prefix in location if present
-                if Config.BACKUP_PREFIX:
-                    backup_location = f"s3://{Config.BACKUP_BUCKET}/{Config.BACKUP_PREFIX}/{self.backup_name}/"
-                else:
-                    backup_location = f"s3://{Config.BACKUP_BUCKET}/{self.backup_name}/"
-                logger.info(f"Location: {backup_location}")
+                logger.info(f"Location: s3://{Config.BACKUP_BUCKET}/{self.backup_name}/")
             else:
                 logger.error("Failed to upload backup to S3")
                 return False
@@ -216,16 +204,18 @@ class IcebergBackup:
 
     def _collect_manifest_files(self, metadata: Dict, table_location: str) -> List[str]:
         """
-        Collect manifest file paths from current snapshot only.
+        Collect manifest file paths from snapshot ancestry chain.
 
-        For backups, we only need the current snapshot's manifest files, not the entire
-        snapshot history. This method extracts the manifest-list path from snapshots
-        (which should only contain the current snapshot after abstraction) and converts
-        relative paths to full S3 URIs.
+        For backups, we collect manifest files from the complete snapshot ancestry chain
+        (from current snapshot back to root). This ensures all snapshots referenced by
+        the current snapshot are included, which is critical for:
+        - Proper application of position delete files
+        - Sequence number validation
+        - Maintaining snapshot parent references
 
         Args:
             metadata: Parsed Iceberg metadata JSON containing snapshots (should be abstracted
-                     metadata with only current snapshot)
+                     metadata with complete snapshot ancestry)
             table_location: Base S3 location of the table for resolving relative paths
 
         Returns:
@@ -233,7 +223,7 @@ class IcebergBackup:
         """
         manifest_files = []
 
-        # After abstraction, metadata should only contain current snapshot
+        # After abstraction, metadata contains the complete snapshot ancestry chain
         for snapshot in metadata.get("snapshots", []):
             if "manifest-list" in snapshot:
                 manifest_list_path = snapshot["manifest-list"]
@@ -249,22 +239,17 @@ class IcebergBackup:
 
     def _collect_data_files(self, manifest_list_files: List[str], table_location: str) -> List[str]:
         """
-        Collect all file paths from manifest list and manifest files.
+        Collect all data file paths from manifest list and manifest files.
 
-        Traverses the manifest hierarchy: manifest lists -> individual manifests -> files.
-        This collects BOTH data files and delete files, as both need to be backed up.
-
-        For DATA manifests (content=0): Only collect ACTIVE files (status 0=EXISTING or 1=ADDED),
-                                       skipping DELETED files (status 2)
-        For DELETE manifests (content=1,2): Collect ALL files regardless of status
-                                            (delete files track row deletions and should be preserved)
+        Traverses the manifest hierarchy: manifest lists -> individual manifests -> data files.
+        Gracefully handles errors in individual files without failing the entire operation.
 
         Args:
             manifest_list_files: List of full S3 URIs to manifest list files (snap-*.avro)
             table_location: Base S3 location of the table for relative path resolution
 
         Returns:
-            List of S3 paths to files (both data and delete files) referenced in the manifests
+            List of S3 paths to data files referenced in the manifests
         """
         data_files = []
 
@@ -279,15 +264,12 @@ class IcebergBackup:
                 if not manifest_list_entries:
                     continue
 
-                # Now read each manifest file to get files
-                for manifest_list_entry in manifest_list_entries:
+                # Now read each manifest file to get data files
+                for entry in manifest_list_entries:
                     # Manifest list entries have a 'manifest_path' field
-                    manifest_path = manifest_list_entry.get("manifest_path")
+                    manifest_path = entry.get("manifest_path")
                     if not manifest_path:
                         continue
-
-                    # Get content type: 0=data, 1=position deletes, 2=equality deletes
-                    content_type = manifest_list_entry.get("content", 0)
 
                     try:
                         # Read the actual manifest file
@@ -297,26 +279,10 @@ class IcebergBackup:
                         if not manifest_entries:
                             continue
 
-                        # Get files from the manifest
+                        # Get data files from the manifest
                         for m_entry in manifest_entries:
-                            # For DATA manifests (content=0): filter by status
-                            # For DELETE manifests (content=1,2): don't filter by status
-                            if content_type == 0:
-                                # Data manifest: only include ACTIVE files (status 0=EXISTING or 1=ADDED)
-                                # Skip DELETED files (status 2)
-                                status = m_entry.get("status", 1)  # Default to ADDED if missing
-                                if status == 2:
-                                    # Skip deleted data files
-                                    logger.debug(f"Skipping deleted data file entry in {manifest_path}")
-                                    continue
-
-                            # For delete manifests (content_type != 0), include all entries
-
                             if "data_file" in m_entry and "file_path" in m_entry["data_file"]:
-                                file_path = m_entry["data_file"]["file_path"]
-                                data_files.append(file_path)
-                                if content_type != 0:
-                                    logger.debug(f"Including delete file: {file_path}")
+                                data_files.append(m_entry["data_file"]["file_path"])
                     except Exception as e:
                         logger.warning(f"Could not read manifest file {manifest_path}: {e}")
                         continue
@@ -331,12 +297,13 @@ class IcebergBackup:
         """
         Upload all backup files to the S3 backup bucket.
 
-        Uploads metadata files (JSON), manifest files (Avro), and data files (Parquet/ORC/Avro)
-        to create a complete, independent backup.
+        Uploads metadata files (JSON) and manifest files (Avro) for the backup.
+        Data files are not copied during backup; they remain in the original location
+        and are copied during restore if needed.
 
         Args:
             backup_metadata: Dictionary containing backup metadata including manifest lists,
-                           individual manifests, abstracted metadata, and data file paths
+                           individual manifests, and abstracted metadata
             table_location: Original table location for constructing full S3 paths
 
         Returns:
@@ -347,11 +314,7 @@ class IcebergBackup:
             entire backup operation unless metadata uploads fail.
         """
         try:
-            # Construct backup prefix including any configured prefix from BACKUP_BUCKET
-            if Config.BACKUP_PREFIX:
-                backup_prefix = f"{Config.BACKUP_PREFIX}/{self.backup_name}/"
-            else:
-                backup_prefix = f"{self.backup_name}/"
+            backup_prefix = f"{self.backup_name}/"
 
             # Upload backup metadata
             metadata_key = f"{backup_prefix}backup_metadata.json"
@@ -373,33 +336,8 @@ class IcebergBackup:
                 return False
             logger.info("Uploaded Iceberg metadata")
 
-            # First, build a map of which manifests are data vs delete manifests
-            # by reading the manifest lists to get the 'content' field
-            manifest_content_map = {}  # manifest_path -> content (0=data, 1=delete, 2=equality delete)
-
+            # Copy manifest list files as raw Avro
             manifest_lists = backup_metadata.get("manifest_lists", [])
-            for relative_path in manifest_lists:
-                full_path = f"{table_location}/{relative_path}"
-                try:
-                    # Read the manifest list to get individual manifest metadata
-                    bucket, key = self.s3_client.parse_s3_uri(full_path)
-                    content = self.s3_client.read_object(bucket, key)
-                    if content:
-                        entries, _ = ManifestFileHandler.read_manifest_file(content)
-                        for entry in entries:
-                            manifest_path = entry.get("manifest_path")
-                            content_type = entry.get("content", 0)  # 0=data, 1=position deletes, 2=equality deletes
-                            if manifest_path:
-                                # Normalize to just the filename for matching
-                                manifest_filename = manifest_path.split("/")[-1]
-                                manifest_content_map[manifest_filename] = content_type
-                                logger.debug(f"Manifest {manifest_filename}: content={content_type}")
-                except Exception as e:
-                    logger.warning(f"Could not read manifest list for content mapping {relative_path}: {e}")
-
-            logger.debug(f"Built manifest content map with {len(manifest_content_map)} entries")
-
-            # Copy manifest list files (manifest lists don't have deleted entries, copy as-is)
             for relative_path in manifest_lists:
                 full_path = f"{table_location}/{relative_path}"
                 try:
@@ -407,7 +345,7 @@ class IcebergBackup:
                     bucket, key = self.s3_client.parse_s3_uri(full_path)
                     content = self.s3_client.read_object(bucket, key)
                     if content:
-                        # Upload raw Avro to backup (manifest lists don't need filtering)
+                        # Upload raw Avro to backup
                         manifest_key = f"{backup_prefix}{relative_path}"
                         if not self.s3_client.write_object(
                             Config.BACKUP_BUCKET, manifest_key, content
@@ -417,52 +355,19 @@ class IcebergBackup:
                     logger.warning(f"Could not copy manifest list {relative_path}: {e}")
             logger.info(f"Uploaded {len(manifest_lists)} manifest list files")
 
-            # Copy individual manifest files
-            # For DATA manifests (content=0): filter out deleted entries (status=2)
-            # For DELETE manifests (content=1,2): copy as-is (don't filter)
+            # Copy individual manifest files as raw Avro
             individual_manifests = backup_metadata.get("individual_manifests", [])
             for relative_path in individual_manifests:
                 full_path = f"{table_location}/{relative_path}"
                 try:
-                    # Determine manifest type from our content map
-                    manifest_filename = relative_path.split("/")[-1]
-                    content_type = manifest_content_map.get(manifest_filename, 0)
-
-                    # Download and parse Avro from source
+                    # Download raw Avro from source
                     bucket, key = self.s3_client.parse_s3_uri(full_path)
                     content = self.s3_client.read_object(bucket, key)
                     if content:
-                        # Read entries and schema
-                        entries, schema = ManifestFileHandler.read_manifest_file(content)
-
-                        # Only filter DATA manifests (content=0), not DELETE manifests (content=1,2)
-                        if content_type == 0:
-                            # Data manifest: filter out deleted entries (status=2)
-                            # Only keep EXISTING (0) and ADDED (1) entries
-                            original_count = len(entries)
-                            active_entries = [e for e in entries if e.get("status", 1) != 2]
-                            filtered_count = len(active_entries)
-                            if original_count != filtered_count:
-                                logger.debug(
-                                    f"Filtered {original_count - filtered_count} deleted entries "
-                                    f"from data manifest {manifest_filename}"
-                                )
-                        else:
-                            # Delete manifest: keep all entries (don't filter by status)
-                            active_entries = entries
-                            logger.debug(
-                                f"Keeping all {len(entries)} entries in delete manifest {manifest_filename}"
-                            )
-
-                        # Rewrite Avro with entries (filtered for data, unfiltered for delete)
-                        filtered_content = ManifestFileHandler.write_manifest_list(
-                            active_entries, schema
-                        )
-
-                        # Upload Avro to backup
+                        # Upload raw Avro to backup
                         manifest_key = f"{backup_prefix}{relative_path}"
                         if not self.s3_client.write_object(
-                            Config.BACKUP_BUCKET, manifest_key, filtered_content
+                            Config.BACKUP_BUCKET, manifest_key, content
                         ):
                             logger.warning(
                                 f"Failed to upload individual manifest {relative_path}"
@@ -471,48 +376,8 @@ class IcebergBackup:
                     logger.warning(f"Could not copy individual manifest {relative_path}: {e}")
             logger.info(f"Uploaded {len(individual_manifests)} individual manifest files")
 
-            # Copy data files (Parquet/ORC/Avro files)
-            data_files = backup_metadata.get("data_files", [])
-            if data_files:
-                logger.info(f"Copying {len(data_files)} data files...")
-                copied_count = 0
-                failed_count = 0
-
-                for i, relative_path in enumerate(data_files, 1):
-                    # Log progress every 10 files or at the end
-                    if i % 10 == 0 or i == len(data_files):
-                        logger.info(f"  Progress: {i}/{len(data_files)} data files processed...")
-
-                    full_path = f"{table_location}/{relative_path}"
-                    try:
-                        # Parse source S3 URI
-                        source_bucket, source_key = self.s3_client.parse_s3_uri(full_path)
-
-                        # Construct destination key
-                        dest_key = f"{backup_prefix}{relative_path}"
-
-                        # Copy the file using S3 copy operation (more efficient than download/upload)
-                        if self.s3_client.copy_object(
-                            source_bucket, source_key, Config.BACKUP_BUCKET, dest_key
-                        ):
-                            copied_count += 1
-                        else:
-                            failed_count += 1
-                            logger.warning(f"Failed to copy data file: {relative_path}")
-                    except Exception as e:
-                        failed_count += 1
-                        logger.warning(f"Could not copy data file {relative_path}: {e}")
-
-                logger.info(
-                    f"Data file copy complete: {copied_count} succeeded, {failed_count} failed"
-                )
-
-                # If too many failures, consider the backup failed
-                if failed_count > copied_count:
-                    logger.error("More than half of data files failed to copy")
-                    return False
-            else:
-                logger.info("No data files to copy")
+            # Note: Data files remain in original location and are not copied during backup
+            # They will be copied during restore operation
 
             return True
 
