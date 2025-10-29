@@ -1,6 +1,6 @@
 ## Running Commands
 
-Always use `uv` as the task runner with `--env-file` to load environment variables:
+Always use `uv` as the task runner with the `--env-file` flag to load environment variables:
 ```bash
 uv run --env-file=.env.local <command>
 ```
@@ -8,6 +8,8 @@ uv run --env-file=.env.local <command>
 Examples:
 - `uv run --env-file=.env.local pytest tests/`
 - `uv run --env-file=.env.local python -m bcn.backup ...`
+
+**Note:** Do NOT use `source .env.local && uv run` as `uv run` creates a new shell without inherited environment variables.
 
 ## Documentation and Specs
 
