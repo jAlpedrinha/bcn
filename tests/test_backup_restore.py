@@ -2,11 +2,14 @@
 End-to-End tests for Iceberg backup and restore
 """
 
+import json
+import time
 import pytest
 
-from bcn.backup import IcebergBackup
+from bcn.backup import IcebergBackup, BackupRepository
 from bcn.config import Config
 from bcn.restore import IcebergRestore
+from bcn.s3_client import S3Client
 
 
 @pytest.mark.e2e
@@ -40,10 +43,10 @@ class TestBackupRestore:
         # Step 2: Create backup
         print(f"\nCreating backup '{backup_name}'...")
         backup = IcebergBackup(database, table, backup_name)
-        backup_success = backup.create_backup()
+        pit_id = backup.create_backup()
 
-        assert backup_success, "Backup creation failed"
-        print(f"✓ Backup '{backup_name}' created successfully")
+        assert pit_id is not None, "Backup creation failed"
+        print(f"✓ Backup '{backup_name}' created successfully: PIT {pit_id}")
 
         # Step 3: Restore to new table
         target_table = f"{table}_restored"
@@ -87,7 +90,8 @@ class TestBackupRestore:
 
         # Create backup
         backup = IcebergBackup(database, table, f"{backup_name}_schema")
-        assert backup.create_backup(), "Backup creation failed"
+        pit_id = backup.create_backup()
+        assert pit_id is not None, "Backup creation failed"
 
         # Restore
         target_table = f"{table}_schema_test"
@@ -129,8 +133,11 @@ class TestBackupRestore:
         backup1 = IcebergBackup(database, table, "backup_1")
         backup2 = IcebergBackup(database, table, "backup_2")
 
-        assert backup1.create_backup(), "First backup failed"
-        assert backup2.create_backup(), "Second backup failed"
+        pit_id_1 = backup1.create_backup()
+        pit_id_2 = backup2.create_backup()
+
+        assert pit_id_1 is not None, "First backup failed"
+        assert pit_id_2 is not None, "Second backup failed"
 
         # Restore both
         for i, backup_name in enumerate(["backup_1", "backup_2"], 1):
@@ -226,10 +233,10 @@ class TestBackupErrors:
     def test_backup_nonexistent_table(self):
         """Test backing up a table that doesn't exist"""
         backup = IcebergBackup("default", "nonexistent_table", "should_fail")
-        result = backup.create_backup()
+        pit_id = backup.create_backup()
 
         # Should fail gracefully
-        assert not result, "Backup of nonexistent table should fail"
+        assert pit_id is None, "Backup of nonexistent table should fail"
         print("✓ Properly handles nonexistent table")
 
 
@@ -250,3 +257,127 @@ class TestRestoreErrors:
         # Should fail gracefully
         assert not result, "Restore of nonexistent backup should fail"
         print("✓ Properly handles nonexistent backup")
+
+
+@pytest.mark.e2e
+@pytest.mark.slow
+class TestPITChain:
+    """Test PIT (Point-in-Time) chain functionality for incremental backups"""
+
+    def test_first_backup_has_no_parent(self, source_table):
+        """
+        Test that the first backup in a backup chain has no parent reference.
+
+        This verifies the unified algorithm: first backup creates initial PIT
+        with parent_pit_id = None.
+        """
+        database = source_table["database"]
+        table = source_table["table"]
+        # Use unique name to avoid test isolation issues
+        backup_name = f"pit_test_first_{int(time.time() * 1000)}"
+
+        # Create first backup
+        backup = IcebergBackup(database, table, backup_name)
+        pit_id_1 = backup.create_backup()
+
+        assert pit_id_1 is not None, "First backup creation failed"
+        print(f"✓ First backup created: PIT {pit_id_1}")
+
+        # Verify first PIT has no parent
+        repository = BackupRepository(backup_name, S3Client())
+        index = repository.get_or_create_index()
+
+        assert len(index["pits"]) == 1, "Should have exactly 1 PIT"
+        first_pit_entry = index["pits"][0]
+
+        assert first_pit_entry["pit_id"] == pit_id_1
+        assert first_pit_entry["parent_pit_id"] is None, "First PIT should have no parent"
+
+        # Verify manifest exists and has no parent
+        manifest = repository.get_pit_manifest(pit_id_1)
+        assert manifest is not None, "PIT manifest should exist"
+        assert manifest["parent_pit_id"] is None, "Manifest should have no parent"
+
+        print(f"✓ First PIT has no parent: {first_pit_entry}")
+
+    def test_second_backup_has_parent(self, source_table):
+        """
+        Test that the second backup in a chain has the first backup as parent.
+
+        This verifies the unified algorithm: subsequent backup creates PIT with
+        parent_pit_id = previous PIT ID.
+        """
+        database = source_table["database"]
+        table = source_table["table"]
+        # Use unique name to avoid test isolation issues
+        backup_name = f"pit_test_second_{int(time.time() * 1000)}"
+
+        # Create first backup
+        backup_1 = IcebergBackup(database, table, backup_name)
+        pit_id_1 = backup_1.create_backup()
+        assert pit_id_1 is not None, "First backup creation failed"
+        print(f"✓ First backup created: PIT {pit_id_1}")
+
+        # Create second backup (same backup_name, creating a chain)
+        backup_2 = IcebergBackup(database, table, backup_name)
+        pit_id_2 = backup_2.create_backup()
+        assert pit_id_2 is not None, "Second backup creation failed"
+        print(f"✓ Second backup created: PIT {pit_id_2}")
+
+        # Verify PIT chain
+        repository = BackupRepository(backup_name, S3Client())
+        index = repository.get_or_create_index()
+
+        assert len(index["pits"]) == 2, "Should have exactly 2 PITs"
+
+        # First PIT should have no parent
+        first_pit_entry = index["pits"][0]
+        assert first_pit_entry["pit_id"] == pit_id_1
+        assert first_pit_entry["parent_pit_id"] is None, "First PIT should have no parent"
+
+        # Second PIT should have first as parent
+        second_pit_entry = index["pits"][1]
+        assert second_pit_entry["pit_id"] == pit_id_2
+        assert second_pit_entry["parent_pit_id"] == pit_id_1, (
+            f"Second PIT should have first as parent. Got: {second_pit_entry['parent_pit_id']}"
+        )
+
+        # Verify manifests
+        manifest_1 = repository.get_pit_manifest(pit_id_1)
+        manifest_2 = repository.get_pit_manifest(pit_id_2)
+
+        assert manifest_1 is not None, "First PIT manifest should exist"
+        assert manifest_2 is not None, "Second PIT manifest should exist"
+        assert manifest_1["parent_pit_id"] is None, "First manifest should have no parent"
+        assert manifest_2["parent_pit_id"] == pit_id_1, "Second manifest should reference first"
+
+        print(f"✓ PIT chain verified:")
+        print(f"  PIT 1: {pit_id_1} (no parent)")
+        print(f"  PIT 2: {pit_id_2} (parent: {pit_id_1})")
+
+    def test_get_last_pit(self, source_table):
+        """
+        Test that repository.get_last_pit() correctly returns the most recent PIT.
+        """
+        database = source_table["database"]
+        table = source_table["table"]
+        # Use unique name to avoid test isolation issues
+        backup_name = f"pit_test_last_{int(time.time() * 1000)}"
+
+        # Create multiple backups
+        pit_ids = []
+        for i in range(3):
+            backup = IcebergBackup(database, table, backup_name)
+            pit_id = backup.create_backup()
+            assert pit_id is not None, f"Backup {i + 1} failed"
+            pit_ids.append(pit_id)
+
+        # Verify last PIT
+        repository = BackupRepository(backup_name, S3Client())
+        last_pit = repository.get_last_pit()
+
+        assert last_pit == pit_ids[-1], (
+            f"Last PIT should be {pit_ids[-1]}, got {last_pit}"
+        )
+
+        print(f"✓ Repository correctly tracks last PIT: {last_pit}")
