@@ -249,18 +249,22 @@ class IcebergBackup:
 
     def _collect_data_files(self, manifest_list_files: List[str], table_location: str) -> List[str]:
         """
-        Collect all active data file paths from manifest list and manifest files.
+        Collect all file paths from manifest list and manifest files.
 
-        Traverses the manifest hierarchy: manifest lists -> individual manifests -> data files.
-        Only collects ACTIVE files (status 0=EXISTING or 1=ADDED), skipping DELETED files (status 2).
-        This ensures we only back up data that is part of the current snapshot.
+        Traverses the manifest hierarchy: manifest lists -> individual manifests -> files.
+        This collects BOTH data files and delete files, as both need to be backed up.
+
+        For DATA manifests (content=0): Only collect ACTIVE files (status 0=EXISTING or 1=ADDED),
+                                       skipping DELETED files (status 2)
+        For DELETE manifests (content=1,2): Collect ALL files regardless of status
+                                            (delete files track row deletions and should be preserved)
 
         Args:
             manifest_list_files: List of full S3 URIs to manifest list files (snap-*.avro)
             table_location: Base S3 location of the table for relative path resolution
 
         Returns:
-            List of S3 paths to active data files referenced in the manifests
+            List of S3 paths to files (both data and delete files) referenced in the manifests
         """
         data_files = []
 
@@ -275,12 +279,15 @@ class IcebergBackup:
                 if not manifest_list_entries:
                     continue
 
-                # Now read each manifest file to get data files
-                for entry in manifest_list_entries:
+                # Now read each manifest file to get files
+                for manifest_list_entry in manifest_list_entries:
                     # Manifest list entries have a 'manifest_path' field
-                    manifest_path = entry.get("manifest_path")
+                    manifest_path = manifest_list_entry.get("manifest_path")
                     if not manifest_path:
                         continue
+
+                    # Get content type: 0=data, 1=position deletes, 2=equality deletes
+                    content_type = manifest_list_entry.get("content", 0)
 
                     try:
                         # Read the actual manifest file
@@ -290,19 +297,26 @@ class IcebergBackup:
                         if not manifest_entries:
                             continue
 
-                        # Get data files from the manifest
-                        # Only include ACTIVE files (status 0=EXISTING or 1=ADDED)
+                        # Get files from the manifest
                         for m_entry in manifest_entries:
-                            # Check entry status: 0=EXISTING, 1=ADDED, 2=DELETED
-                            status = m_entry.get("status", 1)  # Default to ADDED if missing
-                            if status == 2:
-                                # Skip deleted entries
-                                logger.info(f"Skiping manifest entry {m_entry}")
-                                continue
+                            # For DATA manifests (content=0): filter by status
+                            # For DELETE manifests (content=1,2): don't filter by status
+                            if content_type == 0:
+                                # Data manifest: only include ACTIVE files (status 0=EXISTING or 1=ADDED)
+                                # Skip DELETED files (status 2)
+                                status = m_entry.get("status", 1)  # Default to ADDED if missing
+                                if status == 2:
+                                    # Skip deleted data files
+                                    logger.debug(f"Skipping deleted data file entry in {manifest_path}")
+                                    continue
+
+                            # For delete manifests (content_type != 0), include all entries
 
                             if "data_file" in m_entry and "file_path" in m_entry["data_file"]:
-                                logger.info(f"Adding data file {m_entry}")
-                                data_files.append(m_entry["data_file"]["file_path"])
+                                file_path = m_entry["data_file"]["file_path"]
+                                data_files.append(file_path)
+                                if content_type != 0:
+                                    logger.debug(f"Including delete file: {file_path}")
                     except Exception as e:
                         logger.warning(f"Could not read manifest file {manifest_path}: {e}")
                         continue
@@ -359,8 +373,33 @@ class IcebergBackup:
                 return False
             logger.info("Uploaded Iceberg metadata")
 
-            # Copy manifest list files (manifest lists don't have deleted entries, copy as-is)
+            # First, build a map of which manifests are data vs delete manifests
+            # by reading the manifest lists to get the 'content' field
+            manifest_content_map = {}  # manifest_path -> content (0=data, 1=delete, 2=equality delete)
+
             manifest_lists = backup_metadata.get("manifest_lists", [])
+            for relative_path in manifest_lists:
+                full_path = f"{table_location}/{relative_path}"
+                try:
+                    # Read the manifest list to get individual manifest metadata
+                    bucket, key = self.s3_client.parse_s3_uri(full_path)
+                    content = self.s3_client.read_object(bucket, key)
+                    if content:
+                        entries, _ = ManifestFileHandler.read_manifest_file(content)
+                        for entry in entries:
+                            manifest_path = entry.get("manifest_path")
+                            content_type = entry.get("content", 0)  # 0=data, 1=position deletes, 2=equality deletes
+                            if manifest_path:
+                                # Normalize to just the filename for matching
+                                manifest_filename = manifest_path.split("/")[-1]
+                                manifest_content_map[manifest_filename] = content_type
+                                logger.debug(f"Manifest {manifest_filename}: content={content_type}")
+                except Exception as e:
+                    logger.warning(f"Could not read manifest list for content mapping {relative_path}: {e}")
+
+            logger.debug(f"Built manifest content map with {len(manifest_content_map)} entries")
+
+            # Copy manifest list files (manifest lists don't have deleted entries, copy as-is)
             for relative_path in manifest_lists:
                 full_path = f"{table_location}/{relative_path}"
                 try:
@@ -378,11 +417,17 @@ class IcebergBackup:
                     logger.warning(f"Could not copy manifest list {relative_path}: {e}")
             logger.info(f"Uploaded {len(manifest_lists)} manifest list files")
 
-            # Copy individual manifest files, filtering out deleted entries
+            # Copy individual manifest files
+            # For DATA manifests (content=0): filter out deleted entries (status=2)
+            # For DELETE manifests (content=1,2): copy as-is (don't filter)
             individual_manifests = backup_metadata.get("individual_manifests", [])
             for relative_path in individual_manifests:
                 full_path = f"{table_location}/{relative_path}"
                 try:
+                    # Determine manifest type from our content map
+                    manifest_filename = relative_path.split("/")[-1]
+                    content_type = manifest_content_map.get(manifest_filename, 0)
+
                     # Download and parse Avro from source
                     bucket, key = self.s3_client.parse_s3_uri(full_path)
                     content = self.s3_client.read_object(bucket, key)
@@ -390,16 +435,31 @@ class IcebergBackup:
                         # Read entries and schema
                         entries, schema = ManifestFileHandler.read_manifest_file(content)
 
-                        # Filter out deleted entries (status=2)
-                        # Only keep EXISTING (0) and ADDED (1) entries
-                        active_entries = [e for e in entries if e.get("status", 1) != 2]
+                        # Only filter DATA manifests (content=0), not DELETE manifests (content=1,2)
+                        if content_type == 0:
+                            # Data manifest: filter out deleted entries (status=2)
+                            # Only keep EXISTING (0) and ADDED (1) entries
+                            original_count = len(entries)
+                            active_entries = [e for e in entries if e.get("status", 1) != 2]
+                            filtered_count = len(active_entries)
+                            if original_count != filtered_count:
+                                logger.debug(
+                                    f"Filtered {original_count - filtered_count} deleted entries "
+                                    f"from data manifest {manifest_filename}"
+                                )
+                        else:
+                            # Delete manifest: keep all entries (don't filter by status)
+                            active_entries = entries
+                            logger.debug(
+                                f"Keeping all {len(entries)} entries in delete manifest {manifest_filename}"
+                            )
 
-                        # Rewrite Avro with only active entries
+                        # Rewrite Avro with entries (filtered for data, unfiltered for delete)
                         filtered_content = ManifestFileHandler.write_manifest_list(
                             active_entries, schema
                         )
 
-                        # Upload filtered Avro to backup
+                        # Upload Avro to backup
                         manifest_key = f"{backup_prefix}{relative_path}"
                         if not self.s3_client.write_object(
                             Config.BACKUP_BUCKET, manifest_key, filtered_content
