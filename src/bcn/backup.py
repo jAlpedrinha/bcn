@@ -385,8 +385,48 @@ class IcebergBackup:
                     logger.warning(f"Could not copy individual manifest {relative_path}: {e}")
             logger.info(f"Uploaded {len(individual_manifests)} individual manifest files")
 
-            # Note: Data files remain in original location and are not copied during backup
-            # They will be copied during restore operation
+            # Copy data files (Parquet/ORC/Avro files)
+            data_files = backup_metadata.get("data_files", [])
+            if data_files:
+                logger.info(f"Copying {len(data_files)} data files...")
+                copied_count = 0
+                failed_count = 0
+
+                for i, relative_path in enumerate(data_files, 1):
+                    # Log progress every 10 files or at the end
+                    if i % 10 == 0 or i == len(data_files):
+                        logger.info(f"  Progress: {i}/{len(data_files)} data files processed...")
+
+                    full_path = f"{table_location}/{relative_path}"
+                    try:
+                        # Parse source S3 URI
+                        source_bucket, source_key = self.s3_client.parse_s3_uri(full_path)
+
+                        # Construct destination key
+                        dest_key = f"{backup_prefix}{relative_path}"
+
+                        # Copy the file using S3 copy operation (more efficient than download/upload)
+                        if self.s3_client.copy_object(
+                            source_bucket, source_key, Config.BACKUP_BUCKET, dest_key
+                        ):
+                            copied_count += 1
+                        else:
+                            failed_count += 1
+                            logger.warning(f"Failed to copy data file: {relative_path}")
+                    except Exception as e:
+                        failed_count += 1
+                        logger.warning(f"Could not copy data file {relative_path}: {e}")
+
+                logger.info(
+                    f"Data file copy complete: {copied_count} succeeded, {failed_count} failed"
+                )
+
+                # If too many failures, consider the backup failed
+                if failed_count > copied_count:
+                    logger.error("More than half of data files failed to copy")
+                    return False
+            else:
+                logger.info("No data files to copy")
 
             return True
 
