@@ -276,6 +276,15 @@ class IcebergBackup:
                     if not manifest_path:
                         continue
 
+                    # Check manifest content type
+                    # content=0: DATA manifest (actual data files)
+                    # content=1: DELETE manifest (position delete files)
+                    # We only want to collect actual data files, not delete files
+                    content = entry.get("content", 0)
+                    if content != 0:
+                        logger.debug(f"Skipping delete manifest (content={content}): {manifest_path}")
+                        continue
+
                     try:
                         # Read the actual manifest file
                         manifest_entries, _ = ManifestFileHandler.read_manifest_from_s3(
@@ -284,7 +293,7 @@ class IcebergBackup:
                         if not manifest_entries:
                             continue
 
-                        # Get data files from the manifest
+                        # Get data files from the manifest (only from data manifests)
                         for m_entry in manifest_entries:
                             if "data_file" in m_entry and "file_path" in m_entry["data_file"]:
                                 data_files.append(m_entry["data_file"]["file_path"])
