@@ -12,9 +12,9 @@ from typing import Optional
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from bcn.logger import get_logger
+from bcn.logging_config import BCNLogger
 
-logger = get_logger(__name__)
+logger = BCNLogger.get_logger(__name__)
 
 
 class DeleteFileRewriter:
