@@ -19,6 +19,8 @@ dependencies = [
     "thrift-sasl>=0.4.3",
     # Avro for reading manifest files
     "avro-python3>=1.10.2",
+    # Parquet for rewriting delete files
+    "pyarrow>=14.0.0",
     # Spark
     "pyspark>=3.5.0,<4.0.0",
     # Testing

@@ -16,6 +16,7 @@ import uuid
 from typing import List
 
 from bcn.config import Config
+from bcn.delete_file_rewriter import DeleteFileRewriter
 from bcn.iceberg_utils import ManifestFileHandler, PathAbstractor
 from bcn.logging_config import BCNLogger
 from bcn.s3_client import S3Client
@@ -147,6 +148,10 @@ class IcebergRestore:
                 f"  Found {len(manifest_lists)} manifest lists and {len(individual_manifests)} individual manifests to process"
             )
 
+            # Build a set of delete file paths for special handling
+            delete_files = self._identify_delete_files(manifest_lists, individual_manifests)
+            logger.debug(f"  Identified {len(delete_files)} delete files for path rewriting")
+
             restored_manifest_lists = {}
             for relative_path in manifest_lists:
                 logger.debug(f"  Restoring manifest list: {relative_path}")
@@ -169,7 +174,7 @@ class IcebergRestore:
             data_files = self.backup_metadata.get("data_files", [])
             logger.info(f"  Found {len(data_files)} data files to copy")
 
-            self._copy_data_files(data_files, original_location)
+            self._copy_data_files(data_files, original_location, delete_files)
 
             # Step 5: Upload restored metadata to new location
             logger.info("Step 5: Uploading restored metadata to new location...")
@@ -286,6 +291,75 @@ class IcebergRestore:
             logger.error(f"Error downloading backup metadata: {e}", exc_info=True)
             return False
 
+    def _identify_delete_files(
+        self, manifest_lists: List[str], individual_manifests: List[str]
+    ) -> set:
+        """
+        Identify which data files are position delete files that need path rewriting.
+
+        Reads manifest list files to determine which individual manifests are delete manifests
+        (content=1), then reads those manifests to extract the delete file paths.
+
+        Args:
+            manifest_lists: List of relative paths to manifest list files
+            individual_manifests: List of relative paths to individual manifest files
+
+        Returns:
+            Set of relative paths to delete files (e.g., "data/abc/delete.parquet")
+        """
+        delete_files = set()
+
+        # Construct backup key prefix
+        if Config.BACKUP_PREFIX:
+            backup_prefix = f"{Config.BACKUP_PREFIX}/{self.backup_name}"
+        else:
+            backup_prefix = self.backup_name
+
+        # Read manifest lists to identify delete manifests
+        delete_manifest_names = set()
+        for manifest_list_path in manifest_lists:
+            try:
+                # Download manifest list from backup
+                backup_key = f"{backup_prefix}/{manifest_list_path}"
+                content = self.s3_client.read_object(Config.BACKUP_BUCKET, backup_key)
+                if content:
+                    entries, _ = ManifestFileHandler.read_manifest_file(content)
+                    for entry in entries:
+                        content_type = entry.get("content", 0)
+                        if content_type == 1:  # DELETE manifest
+                            manifest_path = entry.get("manifest_path", "")
+                            # Extract just the filename
+                            manifest_filename = manifest_path.split("/")[-1]
+                            delete_manifest_names.add(manifest_filename)
+                            logger.debug(f"Found delete manifest: {manifest_filename}")
+            except Exception as e:
+                logger.warning(f"Could not read manifest list {manifest_list_path}: {e}")
+
+        # Read delete manifests to extract delete file paths
+        for manifest_path in individual_manifests:
+            manifest_filename = manifest_path.split("/")[-1]
+            if manifest_filename in delete_manifest_names:
+                try:
+                    # Download the delete manifest
+                    backup_key = f"{backup_prefix}/{manifest_path}"
+                    content = self.s3_client.read_object(Config.BACKUP_BUCKET, backup_key)
+                    if content:
+                        entries, _ = ManifestFileHandler.read_manifest_file(content)
+                        for entry in entries:
+                            if "data_file" in entry and "file_path" in entry["data_file"]:
+                                file_path = entry["data_file"]["file_path"]
+                                # Extract relative path (remove location prefix)
+                                # The file_path in delete manifests is already absolute
+                                # We need to extract just the relative part
+                                if "/data/" in file_path:
+                                    relative_part = "data/" + file_path.split("/data/", 1)[1]
+                                    delete_files.add(relative_part)
+                                    logger.debug(f"Found delete file: {relative_part}")
+                except Exception as e:
+                    logger.warning(f"Could not read delete manifest {manifest_path}: {e}")
+
+        return delete_files
+
     def _restore_manifest_file(self, relative_path: str) -> tuple:
         """
         Download and restore paths in a manifest file.
@@ -356,17 +430,23 @@ class IcebergRestore:
             logger.error(f"  Error restoring manifest {relative_path}: {e}", exc_info=True)
             return None, None
 
-    def _copy_data_files(self, data_files: List[str], original_location: str) -> None:
+    def _copy_data_files(
+        self, data_files: List[str], original_location: str, delete_files: set
+    ) -> None:
         """
         Copy data files from backup location to new target location.
 
-        Copies all data files from the backup bucket to the new table location in S3.
-        The data files were copied to the backup during the backup operation, making
-        the backup independent of the original table.
+        For regular data files: uses S3 copy_object (efficient server-side copy).
+        For delete files: downloads, rewrites internal file_path references, then uploads.
+
+        Position delete files contain a 'file_path' column that references data files.
+        These paths must be updated from the original location to the new target location
+        for the deletes to be properly applied by query engines.
 
         Args:
             data_files: List of relative data file paths (from manifest files)
-            original_location: Original S3 location of the table (unused, kept for compatibility)
+            original_location: Original S3 location of the table
+            delete_files: Set of relative paths that are position delete files
 
         Raises:
             RuntimeError: If any data files fail to copy, includes list of up to 5 failed files
@@ -382,6 +462,7 @@ class IcebergRestore:
             target_bucket, target_prefix = self.s3_client.parse_s3_uri(self.target_location)
 
             copied = 0
+            rewritten = 0
             failed_files = []
 
             for relative_path in data_files:
@@ -390,15 +471,49 @@ class IcebergRestore:
                 # Build destination path at target location
                 dest_key = f"{target_prefix}/{relative_path}".lstrip("/")
 
-                # Copy the file from backup to target
-                if self.s3_client.copy_object(
-                    Config.BACKUP_BUCKET, source_key, target_bucket, dest_key
-                ):
-                    copied += 1
-                    if copied % 10 == 0:  # Progress update every 10 files
-                        logger.debug(f"  Copied {copied}/{len(data_files)} files...")
+                # Check if this is a delete file that needs path rewriting
+                if relative_path in delete_files:
+                    # Delete file: download, rewrite paths, upload
+                    try:
+                        # Download the delete file from backup
+                        delete_content = self.s3_client.read_object(
+                            Config.BACKUP_BUCKET, source_key
+                        )
+                        if not delete_content:
+                            failed_files.append(relative_path)
+                            continue
+
+                        # Rewrite file paths inside the delete file
+                        rewritten_content = DeleteFileRewriter.rewrite_delete_file_paths(
+                            delete_content, original_location, self.target_location
+                        )
+
+                        if not rewritten_content:
+                            logger.warning(f"Failed to rewrite delete file: {relative_path}")
+                            failed_files.append(relative_path)
+                            continue
+
+                        # Upload rewritten delete file to target
+                        if self.s3_client.write_object(target_bucket, dest_key, rewritten_content):
+                            rewritten += 1
+                            logger.debug(f"  Rewrote delete file: {relative_path}")
+                        else:
+                            failed_files.append(relative_path)
+                    except Exception as e:
+                        logger.warning(f"Error rewriting delete file {relative_path}: {e}")
+                        failed_files.append(relative_path)
                 else:
-                    failed_files.append(relative_path)
+                    # Regular data file: use S3 copy_object (efficient)
+                    if self.s3_client.copy_object(
+                        Config.BACKUP_BUCKET, source_key, target_bucket, dest_key
+                    ):
+                        copied += 1
+                    else:
+                        failed_files.append(relative_path)
+
+                # Progress update every 10 files
+                if (copied + rewritten) % 10 == 0:
+                    logger.debug(f"  Processed {copied + rewritten}/{len(data_files)} files...")
 
             if failed_files:
                 error_msg = f"Failed to copy {len(failed_files)} data files: {failed_files[:5]}"
@@ -406,7 +521,9 @@ class IcebergRestore:
                     error_msg += f" ... and {len(failed_files) - 5} more"
                 raise RuntimeError(error_msg)
 
-            logger.info(f"  Copied {copied} data files from backup")
+            logger.info(
+                f"  Copied {copied} data files and rewrote {rewritten} delete files from backup"
+            )
 
         except RuntimeError:
             # Re-raise RuntimeError from failed copies
