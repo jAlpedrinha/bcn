@@ -19,6 +19,7 @@ from bcn.config import Config
 from bcn.delete_file_rewriter import DeleteFileRewriter
 from bcn.iceberg_utils import ManifestFileHandler, PathAbstractor
 from bcn.logging_config import BCNLogger
+from bcn.manifest_rewriter import ManifestRewriter
 from bcn.s3_client import S3Client
 from bcn.spark_client import SparkClient
 
@@ -364,8 +365,8 @@ class IcebergRestore:
         """
         Download and restore paths in a manifest file.
 
-        Downloads a manifest file (in Avro format) from the backup bucket, parses it,
-        abstracts paths from the original location, and restores them to the new location.
+        Downloads a manifest file (in Avro format) from the backup bucket, rewrites paths
+        in the raw Avro (including bounds), then parses it and restores them to the new location.
         Handles both manifest list files and individual manifest files with different path structures.
 
         Note: Deleted entries (status=2) were already filtered out during backup, so the
@@ -392,39 +393,23 @@ class IcebergRestore:
                 logger.warning(f"  Could not read manifest {relative_path}")
                 return None, None
 
-            # Read the Avro file to get entries and schema
-            entries, schema = ManifestFileHandler.read_manifest_file(content)
-
-            # The manifest files in backup have absolute paths to the original location
-            # First, abstract them to relative paths, then restore them to the new location
+            # Get original location for path rewriting
             original_location = self.backup_metadata["original_location"]
 
-            # Check if this is a manifest list (has manifest_path) or individual manifest (has data_file)
-            if entries and "manifest_path" in entries[0]:
-                # This is a manifest list - abstract then restore manifest_path
-                # Step 1: Abstract the paths from original location
-                abstracted_entries = ManifestFileHandler.abstract_manifest_paths_avro(
-                    entries, original_location
-                )
-                # Step 2: Restore the paths to new location
-                restored_entries = ManifestFileHandler.restore_manifest_paths(
-                    abstracted_entries, self.target_location
-                )
-            elif entries and "data_file" in entries[0]:
-                # This is an individual manifest - abstract then restore data_file paths
-                # Note: Deleted entries were already filtered out during backup
-                # Step 1: Abstract the paths from original location
-                abstracted_entries = ManifestFileHandler.abstract_manifest_data_paths_avro(
-                    entries, original_location
-                )
-                # Step 2: Restore the paths to new location
-                restored_entries = ManifestFileHandler.restore_manifest_data_paths(
-                    abstracted_entries, self.target_location
-                )
-            else:
-                restored_entries = entries
+            # Step 1: Rewrite paths in the raw Avro (including lower_bounds/upper_bounds)
+            rewritten_content = ManifestRewriter.rewrite_manifest_paths(
+                content, original_location, self.target_location
+            )
 
-            return restored_entries, schema
+            if rewritten_content:
+                content = rewritten_content
+                logger.debug(f"  Rewrote paths in manifest: {relative_path}")
+
+            # Read the Avro file to get entries and schema
+            # The paths have already been rewritten by ManifestRewriter above
+            entries, schema = ManifestFileHandler.read_manifest_file(content)
+
+            return entries, schema
 
         except Exception as e:
             logger.error(f"  Error restoring manifest {relative_path}: {e}", exc_info=True)
