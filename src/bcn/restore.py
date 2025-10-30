@@ -113,6 +113,12 @@ class IcebergRestore:
             # Set new location
             restored_metadata["location"] = self.target_location
 
+            # Update write.object-storage.path property if it exists
+            if "properties" in restored_metadata and "write.object-storage.path" in restored_metadata["properties"]:
+                # Update to point to new table's data directory
+                restored_metadata["properties"]["write.object-storage.path"] = f"{self.target_location}/data"
+                logger.debug(f"Updated write.object-storage.path to {self.target_location}/data")
+
             # Restore snapshot manifest paths
             for snapshot in restored_metadata.get("snapshots", []):
                 if "manifest-list" in snapshot:
