@@ -62,18 +62,13 @@ class ManifestRewriter:
 
                 # Update file_path in data_file
                 file_path = data_file.get("file_path", "")
-                logger.debug(f"Original file_path: {file_path}")
                 if file_path and file_path.startswith(old_location):
                     new_path = new_location + file_path[len(old_location) :]
                     data_file["file_path"] = new_path
 
                     name_without_prefix = file_path[len(old_location) + 1 :]
                     # Update file_size in data_file if it matches a deleted file
-                    logger.debug(f"Is file {name_without_prefix} deleted: {name_without_prefix in deleted_files_sizes}")
-                    logger.debug(f"Deleted files sizes: {deleted_files_sizes}")
                     if name_without_prefix in deleted_files_sizes:
-                        logger.debug(f"Updating file size for deleted file: {name_without_prefix}")
-                        logger.debug(f"\n\tPrevious size {data_file.get('file_size_in_bytes')}, New size: {deleted_files_sizes[name_without_prefix]}")
                         data_file["file_size_in_bytes"] = deleted_files_sizes[name_without_prefix]
                         # Remove statistics fields that are no longer valid after rewriting
                         for key in ["column_sizes", "value_counts", "null_value_counts", "lower_bounds", "upper_bounds", "nan_value_counts"]:
