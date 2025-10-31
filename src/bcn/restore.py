@@ -152,6 +152,12 @@ class IcebergRestore:
             # Build a set of delete file paths for special handling
             delete_files = self._identify_delete_files(manifest_lists, individual_manifests)
             logger.debug(f"  Identified {len(delete_files)} delete files for path rewriting")
+            # Copy and rewrite delete files first
+            deleted_files_sizes = {}
+            if delete_files:
+                logger.info("  Copying and rewriting delete files...")
+                deleted_files_sizes = self._copy_deleted_files(delete_files, original_location)
+                logger.info(f"  Successfully copied and rewritten {len(deleted_files_sizes)} delete files")
 
             restored_manifest_lists = {}
             for relative_path in manifest_lists:
@@ -163,7 +169,7 @@ class IcebergRestore:
             restored_individual_manifests = {}
             for relative_path in individual_manifests:
                 logger.debug(f"  Restoring individual manifest: {relative_path}")
-                entries, schema = self._restore_manifest_file(relative_path)
+                entries, schema = self._restore_manifest_file(relative_path, deleted_files_sizes)
                 if entries is not None and schema is not None:
                     restored_individual_manifests[relative_path] = {
                         "entries": entries,
@@ -361,7 +367,7 @@ class IcebergRestore:
 
         return delete_files
 
-    def _restore_manifest_file(self, relative_path: str) -> tuple:
+    def _restore_manifest_file(self, relative_path: str, deleted_files_sizes: dict = {}) -> tuple:
         """
         Download and restore paths in a manifest file.
 
@@ -374,6 +380,7 @@ class IcebergRestore:
 
         Args:
             relative_path: Relative path to the manifest file within the backup (from backup_metadata.json)
+            deleted_files_sizes: Dictionary mapping relative delete file paths to their sizes in bytes
 
         Returns:
             Tuple of (entries, schema) where:
@@ -398,7 +405,7 @@ class IcebergRestore:
 
             # Step 1: Rewrite paths in the raw Avro (including lower_bounds/upper_bounds)
             rewritten_content = ManifestRewriter.rewrite_manifest_paths(
-                content, original_location, self.target_location
+                content, original_location, self.target_location, deleted_files_sizes
             )
 
             if rewritten_content:
@@ -415,6 +422,73 @@ class IcebergRestore:
             logger.error(f"  Error restoring manifest {relative_path}: {e}", exc_info=True)
             return None, None
 
+    def _copy_deleted_files(self, delete_files: set, original_location: str) -> dict:
+        """
+        Copy and rewrite position delete files from backup to new target location.
+    
+        Position delete files contain a 'file_path' column that references data files.
+        These paths must be updated from the original location to the new target location
+        for the deletes to be properly applied by query engines.
+
+        Args:
+            delete_files: Set of relative paths that are position delete files
+            original_location: Original S3 location of the table
+        Returns:
+            Dictionary mapping relative delete file paths to their sizes in bytes
+        """
+        try:
+            if Config.BACKUP_PREFIX:
+                backup_source_prefix = f"{Config.BACKUP_PREFIX}/{self.backup_name}"
+            else:
+                backup_source_prefix = self.backup_name
+
+            failed_files = []
+            deleted_files_sizes = {}
+            rewritten = 0
+            target_bucket, target_prefix = self.s3_client.parse_s3_uri(self.target_location)
+
+            for relative_path in delete_files:
+                # Build source path from backup location
+                source_key = f"{backup_source_prefix}/{relative_path}"
+                # Build destination path at target location
+                dest_key = f"{target_prefix}/{relative_path}".lstrip("/")
+                # Delete file: download, rewrite paths, upload
+                try:
+                    # Download the delete file from backup
+                    delete_content = self.s3_client.read_object(
+                        Config.BACKUP_BUCKET, source_key
+                    )
+                    if not delete_content:
+                        failed_files.append(relative_path)
+                        continue
+
+                    # Rewrite file paths inside the delete file
+                    rewritten_content = DeleteFileRewriter.rewrite_delete_file_paths(
+                        delete_content, original_location, self.target_location
+                    )
+
+                    if not rewritten_content:
+                        logger.warning(f"Failed to rewrite delete file: {relative_path}")
+                        failed_files.append(relative_path)
+                        continue
+
+                    deleted_files_sizes[relative_path] = len(rewritten_content)
+                    # Upload rewritten delete file to target
+                    if self.s3_client.write_object(target_bucket, dest_key, rewritten_content):
+                        rewritten += 1
+                        logger.debug(f"  Rewrote delete file: {relative_path}")
+                    else:
+                        failed_files.append(relative_path)
+                except Exception as e:
+                    logger.warning(f"Error rewriting delete file {relative_path}: {e}")
+                    failed_files.append(relative_path)
+            return deleted_files_sizes
+        except RuntimeError:
+            # Re-raise RuntimeError from failed copies
+            raise
+        except Exception as e:
+            raise RuntimeError(f"Error copying data files: {e}") from e
+
     def _copy_data_files(
         self, data_files: List[str], original_location: str, delete_files: set
     ) -> None:
@@ -422,11 +496,7 @@ class IcebergRestore:
         Copy data files from backup location to new target location.
 
         For regular data files: uses S3 copy_object (efficient server-side copy).
-        For delete files: downloads, rewrites internal file_path references, then uploads.
-
-        Position delete files contain a 'file_path' column that references data files.
-        These paths must be updated from the original location to the new target location
-        for the deletes to be properly applied by query engines.
+        For delete files: ignore them, they were previously copied.
 
         Args:
             data_files: List of relative data file paths (from manifest files)
@@ -458,35 +528,7 @@ class IcebergRestore:
 
                 # Check if this is a delete file that needs path rewriting
                 if relative_path in delete_files:
-                    # Delete file: download, rewrite paths, upload
-                    try:
-                        # Download the delete file from backup
-                        delete_content = self.s3_client.read_object(
-                            Config.BACKUP_BUCKET, source_key
-                        )
-                        if not delete_content:
-                            failed_files.append(relative_path)
-                            continue
-
-                        # Rewrite file paths inside the delete file
-                        rewritten_content = DeleteFileRewriter.rewrite_delete_file_paths(
-                            delete_content, original_location, self.target_location
-                        )
-
-                        if not rewritten_content:
-                            logger.warning(f"Failed to rewrite delete file: {relative_path}")
-                            failed_files.append(relative_path)
-                            continue
-
-                        # Upload rewritten delete file to target
-                        if self.s3_client.write_object(target_bucket, dest_key, rewritten_content):
-                            rewritten += 1
-                            logger.debug(f"  Rewrote delete file: {relative_path}")
-                        else:
-                            failed_files.append(relative_path)
-                    except Exception as e:
-                        logger.warning(f"Error rewriting delete file {relative_path}: {e}")
-                        failed_files.append(relative_path)
+                    continue
                 else:
                     # Regular data file: use S3 copy_object (efficient)
                     if self.s3_client.copy_object(

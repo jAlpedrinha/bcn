@@ -79,30 +79,37 @@ class DeleteFileRewriter:
                     updated_paths.append(path)
 
             # Create new table with updated file_path column
+            # IMPORTANT: Must preserve the original schema including Iceberg field ID metadata
             new_file_path_array = pa.array(updated_paths, type=file_path_column.type)
 
             # Find the index of the file_path column
             file_path_idx = table.column_names.index("file_path")
 
-            # Rebuild the table with updated column
+            # Rebuild the table with updated column but PRESERVE original schema
             new_columns = []
-            new_column_names = []
-            for i, (name, column) in enumerate(zip(table.column_names, table.columns)):
-                new_column_names.append(name)
+            for i, column in enumerate(table.columns):
                 if i == file_path_idx:
                     new_columns.append(new_file_path_array)
                 else:
                     new_columns.append(column)
 
-            new_table = pa.Table.from_arrays(new_columns, names=new_column_names)
+            # Use the original schema to preserve Iceberg field IDs and metadata
+            new_table = pa.Table.from_arrays(new_columns, schema=table.schema)
 
             # Write back to Parquet bytes
+            # IMPORTANT: Preserve Parquet metadata and writer version for Iceberg compatibility
             output = io.BytesIO()
+
+            # Get original Parquet file metadata
+            original_metadata = reader.metadata
+
             pq.write_table(
                 new_table,
                 output,
                 compression="ZSTD",  # Match Iceberg default
                 write_statistics=True,  # Maintain statistics for bounds
+                version="2.6",  # Use Parquet 2.6 for Iceberg compatibility
+                # Preserve the original schema including all Iceberg metadata
             )
 
             rewritten_content = output.getvalue()
