@@ -1,13 +1,15 @@
 ## Running Commands
 
-Always use `uv` as the task runner and source `.env.local` before running commands:
+Always use `uv` as the task runner with the `--env-file` flag to load environment variables:
 ```bash
-source .env.local && uv run <command>
+uv run --env-file=.env.local <command>
 ```
 
 Examples:
-- `source .env.local && uv run pytest tests/`
-- `source .env.local && uv run python -m bcn.backup ...`
+- `uv run --env-file=.env.local pytest tests/`
+- `uv run --env-file=.env.local python -m bcn.backup ...`
+
+**Note:** Do NOT use `source .env.local && uv run` as `uv run` creates a new shell without inherited environment variables.
 
 ## Documentation and Specs
 

@@ -85,14 +85,23 @@ class PathAbstractor:
     @staticmethod
     def abstract_metadata_file(metadata_content: Dict, table_location: str) -> Dict:
         """
-        Abstract paths in main metadata file
+        Abstract paths in main metadata file and keep snapshot ancestry chain.
+
+        For a restored table, we preserve the complete snapshot ancestry chain from the
+        current snapshot back to the root. This is critical for proper handling of:
+        - Position delete files that reference earlier snapshots
+        - Sequence number validation
+        - Parent snapshot references in the current snapshot
+
+        Without the full ancestry, query engines may skip applying delete files,
+        resulting in incorrect row counts.
 
         Args:
             metadata_content: Parsed metadata JSON content
             table_location: Table location to abstract
 
         Returns:
-            Modified metadata with abstracted paths
+            Modified metadata with abstracted paths and complete snapshot ancestry
         """
         abstracted = copy.deepcopy(metadata_content)
 
@@ -100,24 +109,51 @@ class PathAbstractor:
         if "location" in abstracted:
             abstracted["location"] = ""  # Will be set during restore
 
-        # Abstract snapshot metadata locations
-        if "snapshots" in abstracted:
-            for snapshot in abstracted["snapshots"]:
+        # Build snapshot ancestry chain starting from current snapshot
+        current_snapshot_id = abstracted.get("current-snapshot-id")
+        if current_snapshot_id and "snapshots" in abstracted:
+            # Create a map of snapshot-id -> snapshot for easy lookup
+            snapshot_map = {s.get("snapshot-id"): s for s in abstracted["snapshots"]}
+
+            # Build ancestry chain by following parent-snapshot-id links
+            snapshots_to_keep = []
+            snapshot_id = current_snapshot_id
+
+            while snapshot_id is not None:
+                snapshot = snapshot_map.get(snapshot_id)
+                if snapshot is None:
+                    # Snapshot not found, stop traversing
+                    break
+
+                # Abstract the manifest-list path
                 if "manifest-list" in snapshot:
                     snapshot["manifest-list"] = PathAbstractor.abstract_path(
                         snapshot["manifest-list"], table_location
                     )
 
-        # Clear snapshot log for MVP (as per spec, we assume no history)
+                snapshots_to_keep.append(snapshot)
+
+                # Move to parent snapshot
+                snapshot_id = snapshot.get("parent-snapshot-id")
+
+            # Reverse to get chronological order (oldest first)
+            snapshots_to_keep.reverse()
+
+            if snapshots_to_keep:
+                abstracted["snapshots"] = snapshots_to_keep
+            else:
+                # Fallback: if we couldn't build the chain, keep all snapshots
+                for snapshot in abstracted["snapshots"]:
+                    if "manifest-list" in snapshot:
+                        snapshot["manifest-list"] = PathAbstractor.abstract_path(
+                            snapshot["manifest-list"], table_location
+                        )
+
+        # Clear snapshot log (no history for restored table)
         abstracted["snapshot-log"] = []
 
-        # Abstract metadata log entries
-        if "metadata-log" in abstracted:
-            for entry in abstracted["metadata-log"]:
-                if "metadata-file" in entry:
-                    entry["metadata-file"] = PathAbstractor.abstract_path(
-                        entry["metadata-file"], table_location
-                    )
+        # Clear metadata log (no history for restored table)
+        abstracted["metadata-log"] = []
 
         return abstracted
 

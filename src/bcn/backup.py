@@ -185,7 +185,12 @@ class IcebergBackup:
 
             if success:
                 logger.info(f"Backup '{self.backup_name}' created successfully!")
-                logger.info(f"Location: s3://{Config.BACKUP_BUCKET}/{self.backup_name}/")
+                # Include prefix in location path if configured
+                if Config.BACKUP_PREFIX:
+                    backup_location = f"s3://{Config.BACKUP_BUCKET}/{Config.BACKUP_PREFIX}/{self.backup_name}/"
+                else:
+                    backup_location = f"s3://{Config.BACKUP_BUCKET}/{self.backup_name}/"
+                logger.info(f"Location: {backup_location}")
             else:
                 logger.error("Failed to upload backup to S3")
                 return False
@@ -204,13 +209,18 @@ class IcebergBackup:
 
     def _collect_manifest_files(self, metadata: Dict, table_location: str) -> List[str]:
         """
-        Collect all manifest file paths from Iceberg metadata.
+        Collect manifest file paths from snapshot ancestry chain.
 
-        Extracts manifest-list paths from all snapshots in the metadata and converts
-        relative paths to full S3 URIs for consistent processing.
+        For backups, we collect manifest files from the complete snapshot ancestry chain
+        (from current snapshot back to root). This ensures all snapshots referenced by
+        the current snapshot are included, which is critical for:
+        - Proper application of position delete files
+        - Sequence number validation
+        - Maintaining snapshot parent references
 
         Args:
-            metadata: Parsed Iceberg metadata JSON containing snapshots
+            metadata: Parsed Iceberg metadata JSON containing snapshots (should be abstracted
+                     metadata with complete snapshot ancestry)
             table_location: Base S3 location of the table for resolving relative paths
 
         Returns:
@@ -218,6 +228,7 @@ class IcebergBackup:
         """
         manifest_files = []
 
+        # After abstraction, metadata contains the complete snapshot ancestry chain
         for snapshot in metadata.get("snapshots", []):
             if "manifest-list" in snapshot:
                 manifest_list_path = snapshot["manifest-list"]
@@ -258,7 +269,7 @@ class IcebergBackup:
                 if not manifest_list_entries:
                     continue
 
-                # Now read each manifest file to get data files
+                # Now read each manifest file to get all data files (including delete files)
                 for entry in manifest_list_entries:
                     # Manifest list entries have a 'manifest_path' field
                     manifest_path = entry.get("manifest_path")
@@ -273,7 +284,8 @@ class IcebergBackup:
                         if not manifest_entries:
                             continue
 
-                        # Get data files from the manifest
+                        # Collect all file paths (both data files and delete files)
+                        # Delete files will have their paths rewritten during restore
                         for m_entry in manifest_entries:
                             if "data_file" in m_entry and "file_path" in m_entry["data_file"]:
                                 data_files.append(m_entry["data_file"]["file_path"])
@@ -308,7 +320,11 @@ class IcebergBackup:
             entire backup operation unless metadata uploads fail.
         """
         try:
-            backup_prefix = f"{self.backup_name}/"
+            # Construct backup prefix including any configured prefix from BACKUP_BUCKET
+            if Config.BACKUP_PREFIX:
+                backup_prefix = f"{Config.BACKUP_PREFIX}/{self.backup_name}/"
+            else:
+                backup_prefix = f"{self.backup_name}/"
 
             # Upload backup metadata
             metadata_key = f"{backup_prefix}backup_metadata.json"
@@ -330,7 +346,7 @@ class IcebergBackup:
                 return False
             logger.info("Uploaded Iceberg metadata")
 
-            # Copy manifest list files as raw Avro
+            # Copy manifest list files as raw Avro (no filtering needed)
             manifest_lists = backup_metadata.get("manifest_lists", [])
             for relative_path in manifest_lists:
                 full_path = f"{table_location}/{relative_path}"
@@ -349,7 +365,7 @@ class IcebergBackup:
                     logger.warning(f"Could not copy manifest list {relative_path}: {e}")
             logger.info(f"Uploaded {len(manifest_lists)} manifest list files")
 
-            # Copy individual manifest files as raw Avro
+            # Copy individual manifest files as raw Avro (no filtering needed)
             individual_manifests = backup_metadata.get("individual_manifests", [])
             for relative_path in individual_manifests:
                 full_path = f"{table_location}/{relative_path}"
@@ -370,8 +386,48 @@ class IcebergBackup:
                     logger.warning(f"Could not copy individual manifest {relative_path}: {e}")
             logger.info(f"Uploaded {len(individual_manifests)} individual manifest files")
 
-            # Note: Data files remain in original location and are not copied during backup
-            # They will be copied during restore operation
+            # Copy data files (Parquet/ORC/Avro files)
+            data_files = backup_metadata.get("data_files", [])
+            if data_files:
+                logger.info(f"Copying {len(data_files)} data files...")
+                copied_count = 0
+                failed_count = 0
+
+                for i, relative_path in enumerate(data_files, 1):
+                    # Log progress every 10 files or at the end
+                    if i % 10 == 0 or i == len(data_files):
+                        logger.info(f"  Progress: {i}/{len(data_files)} data files processed...")
+
+                    full_path = f"{table_location}/{relative_path}"
+                    try:
+                        # Parse source S3 URI
+                        source_bucket, source_key = self.s3_client.parse_s3_uri(full_path)
+
+                        # Construct destination key
+                        dest_key = f"{backup_prefix}{relative_path}"
+
+                        # Copy the file using S3 copy operation (more efficient than download/upload)
+                        if self.s3_client.copy_object(
+                            source_bucket, source_key, Config.BACKUP_BUCKET, dest_key
+                        ):
+                            copied_count += 1
+                        else:
+                            failed_count += 1
+                            logger.warning(f"Failed to copy data file: {relative_path}")
+                    except Exception as e:
+                        failed_count += 1
+                        logger.warning(f"Could not copy data file {relative_path}: {e}")
+
+                logger.info(
+                    f"Data file copy complete: {copied_count} succeeded, {failed_count} failed"
+                )
+
+                # If too many failures, consider the backup failed
+                if failed_count > copied_count:
+                    logger.error("More than half of data files failed to copy")
+                    return False
+            else:
+                logger.info("No data files to copy")
 
             return True
 

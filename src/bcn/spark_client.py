@@ -39,21 +39,9 @@ class SparkClient:
 
             builder = SparkSession.builder.appName(self.app_name)
 
-            # Common Spark catalog configuration
+            # Common Spark configuration
             builder = (
-                builder.config(
-                    f"spark.sql.catalog.{catalog_name}", "org.apache.iceberg.spark.SparkCatalog"
-                )
-                .config(f"spark.sql.catalog.{catalog_name}.type", catalog_type)
-                .config(
-                    f"spark.sql.catalog.{catalog_name}.warehouse",
-                    f"s3a://{Config.WAREHOUSE_BUCKET}/",
-                )
-                .config(
-                    f"spark.sql.catalog.{catalog_name}.io-impl",
-                    "org.apache.iceberg.aws.s3.S3FileIO",
-                )
-                .config("spark.sql.defaultCatalog", catalog_name)
+                builder.config("spark.sql.defaultCatalog", catalog_name)
                 .config(
                     "spark.sql.extensions",
                     "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
@@ -63,18 +51,54 @@ class SparkClient:
             # Catalog-specific configuration
             if catalog_type == "hive":
                 # Hive metastore configuration
-                builder = builder.config(
-                    f"spark.sql.catalog.{catalog_name}.uri", Config.HIVE_METASTORE_URI
+                builder = (
+                    builder.config(
+                        f"spark.sql.catalog.{catalog_name}",
+                        "org.apache.iceberg.spark.SparkCatalog",
+                    )
+                    .config(f"spark.sql.catalog.{catalog_name}.type", "hive")
+                    .config(f"spark.sql.catalog.{catalog_name}.uri", Config.HIVE_METASTORE_URI)
+                    .config(
+                        f"spark.sql.catalog.{catalog_name}.warehouse",
+                        f"s3a://{Config.WAREHOUSE_BUCKET}/",
+                    )
+                    .config(
+                        f"spark.sql.catalog.{catalog_name}.io-impl",
+                        "org.apache.iceberg.aws.s3.S3FileIO",
+                    )
                 )
             elif catalog_type == "glue":
-                # AWS Glue configuration - uses AWS SDK defaults
+                # AWS Glue configuration - uses Iceberg's GlueCatalog implementation
                 # Glue catalog uses AWS credentials from environment or IAM roles
-                pass
+                builder = (
+                    builder.config(
+                        f"spark.sql.catalog.{catalog_name}",
+                        "org.apache.iceberg.spark.SparkCatalog",
+                    )
+                    .config(
+                        f"spark.sql.catalog.{catalog_name}.catalog-impl",
+                        "org.apache.iceberg.aws.glue.GlueCatalog",
+                    )
+                    .config(
+                        f"spark.sql.catalog.{catalog_name}.warehouse",
+                        f"s3://{Config.WAREHOUSE_BUCKET}/",
+                    )
+                    .config(
+                        f"spark.sql.catalog.{catalog_name}.io-impl",
+                        "org.apache.iceberg.aws.s3.S3FileIO",
+                    )
+                )
 
             # S3 configuration for Iceberg catalog
             builder = builder.config(
                 f"spark.sql.catalog.{catalog_name}.s3.access-key-id", Config.S3_ACCESS_KEY
             ).config(f"spark.sql.catalog.{catalog_name}.s3.secret-access-key", Config.S3_SECRET_KEY)
+
+            # S3 session token (for AWS STS/AssumeRole)
+            if Config.S3_SESSION_TOKEN and Config.S3_SESSION_TOKEN.strip():
+                builder = builder.config(
+                    f"spark.sql.catalog.{catalog_name}.s3.session-token", Config.S3_SESSION_TOKEN
+                )
 
             # S3 endpoint and path-style access (only for MinIO/custom S3)
             if Config.S3_ENDPOINT and Config.S3_ENDPOINT.strip():
@@ -93,6 +117,12 @@ class SparkClient:
                 .config("spark.hadoop.fs.s3a.secret.key", Config.S3_SECRET_KEY)
                 .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
             )
+
+            # Hadoop S3A session token (for AWS STS/AssumeRole)
+            if Config.S3_SESSION_TOKEN and Config.S3_SESSION_TOKEN.strip():
+                builder = builder.config(
+                    "spark.hadoop.fs.s3a.session.token", Config.S3_SESSION_TOKEN
+                )
 
             # Hadoop S3A endpoint and path-style (only for MinIO/custom S3)
             if Config.S3_ENDPOINT and Config.S3_ENDPOINT.strip():
