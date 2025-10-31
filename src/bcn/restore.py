@@ -153,6 +153,7 @@ class IcebergRestore:
             delete_files = self._identify_delete_files(manifest_lists, individual_manifests)
             logger.debug(f"  Identified {len(delete_files)} delete files for path rewriting")
             # Copy and rewrite delete files first
+            deleted_files_sizes = {}
             if delete_files:
                 logger.info("  Copying and rewriting delete files...")
                 deleted_files_sizes = self._copy_deleted_files(delete_files, original_location)
@@ -443,6 +444,7 @@ class IcebergRestore:
 
             failed_files = []
             deleted_files_sizes = {}
+            rewritten = 0
             target_bucket, target_prefix = self.s3_client.parse_s3_uri(self.target_location)
 
             for relative_path in delete_files:

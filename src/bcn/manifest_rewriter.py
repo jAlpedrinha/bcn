@@ -70,12 +70,14 @@ class ManifestRewriter:
                     name_without_prefix = file_path[len(old_location) + 1 :]
                     # Update file_size in data_file if it matches a deleted file
                     logger.debug(f"Is file {name_without_prefix} deleted: {name_without_prefix in deleted_files_sizes}")
-                    print(deleted_files_sizes)
+                    logger.debug(f"Deleted files sizes: {deleted_files_sizes}")
                     if name_without_prefix in deleted_files_sizes:
                         logger.debug(f"Updating file size for deleted file: {name_without_prefix}")
                         logger.debug(f"\n\tPrevious size {data_file.get('file_size_in_bytes')}, New size: {deleted_files_sizes[name_without_prefix]}")
                         data_file["file_size_in_bytes"] = deleted_files_sizes[name_without_prefix]
-                        data_file = data_file - { "column_sizes", "value_counts", "null_value_counts", "lower_bounds", "upper_bounds", "nan_value_counts" }
+                        # Remove statistics fields that are no longer valid after rewriting
+                        for key in ["column_sizes", "value_counts", "null_value_counts", "lower_bounds", "upper_bounds", "nan_value_counts"]:
+                            data_file.pop(key, None)
                     changes_made = True
                     
                 # Update lower_bounds - check all fields for paths (not just field ID 134)
@@ -129,5 +131,5 @@ class ManifestRewriter:
             return output.getvalue()
 
         except Exception as e:
-            print(f"Error rewriting manifest paths: {e}")
+            logger.error(f"Error rewriting manifest paths: {e}", exc_info=True)
             return None
