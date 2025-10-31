@@ -5,14 +5,16 @@ Utility for rewriting paths in Iceberg manifest files.
 import io
 from typing import Optional
 import fastavro
+from bcn.logging_config import BCNLogger
 
+logger = BCNLogger.get_logger(__name__)
 
 class ManifestRewriter:
     """Rewrites path references in Iceberg manifest Avro files."""
 
     @staticmethod
     def rewrite_manifest_paths(
-        manifest_content: bytes, old_location: str, new_location: str
+        manifest_content: bytes, old_location: str, new_location: str, deleted_files_sizes: dict
     ) -> Optional[bytes]:
         """
         Rewrite path references in a manifest Avro file.
@@ -26,6 +28,7 @@ class ManifestRewriter:
             manifest_content: Raw bytes of the manifest Avro file
             old_location: Old location prefix (e.g., "s3://bucket/ref_participant")
             new_location: New location prefix (e.g., "s3://bucket/ref_participant_copy")
+            deleted_files_sizes: Dictionary mapping deleted file paths to their sizes
 
         Returns:
             Rewritten manifest content as bytes, or None if no rewriting needed
@@ -59,11 +62,22 @@ class ManifestRewriter:
 
                 # Update file_path in data_file
                 file_path = data_file.get("file_path", "")
+                logger.debug(f"Original file_path: {file_path}")
                 if file_path and file_path.startswith(old_location):
                     new_path = new_location + file_path[len(old_location) :]
                     data_file["file_path"] = new_path
-                    changes_made = True
 
+                    name_without_prefix = file_path[len(old_location) + 1 :]
+                    # Update file_size in data_file if it matches a deleted file
+                    logger.debug(f"Is file {name_without_prefix} deleted: {name_without_prefix in deleted_files_sizes}")
+                    print(deleted_files_sizes)
+                    if name_without_prefix in deleted_files_sizes:
+                        logger.debug(f"Updating file size for deleted file: {name_without_prefix}")
+                        logger.debug(f"\n\tPrevious size {data_file.get('file_size_in_bytes')}, New size: {deleted_files_sizes[name_without_prefix]}")
+                        data_file["file_size_in_bytes"] = deleted_files_sizes[name_without_prefix]
+                        data_file = data_file - { "column_sizes", "value_counts", "null_value_counts", "lower_bounds", "upper_bounds", "nan_value_counts" }
+                    changes_made = True
+                    
                 # Update lower_bounds - check all fields for paths (not just field ID 134)
                 # Some schemas use different field IDs (e.g., 2147483546)
                 lower_bounds = data_file.get("lower_bounds")
